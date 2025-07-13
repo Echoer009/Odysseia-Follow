@@ -16,5 +16,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # 6. 定义容器启动时要执行的命令
-#    这和您在本地运行的方式完全一致
-CMD ["python", "-m", "src.bot"]
+#    添加 -u 参数来禁用输出缓冲
+CMD ["python", "-u", "-m", "src.bot"]
