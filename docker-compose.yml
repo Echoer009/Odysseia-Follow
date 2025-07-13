@@ -1,0 +1,14 @@
+version: '3.8'
+
+services:
+  bot:
+    # 指示 Docker Compose 使用当前目录下的 Dockerfile 来构建镜像
+    build: .
+    # 将容器命名为 the-follow-bot，方便管理
+    container_name: the-follow-bot
+    # 设置重启策略：除非手动停止，否则在崩溃后总是自动重启
+    restart: unless-stopped
+    # 将 .env 文件中的所有变量加载到容器的环境中
+    # 这是最关键的一步，它安全地将您的 TOKEN 和 GUILD_ID 传递给机器人
+    env_file:
+      - .env
