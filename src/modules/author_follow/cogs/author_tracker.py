@@ -7,7 +7,17 @@ import asyncio
 import os
 
 resource_channel_ids_str = os.getenv('RESOURCE_CHANNEL_IDS', '')
-RESOURCE_CHANNEL_IDS = {int(id.strip()) for id in resource_channel_ids_str.split(',') if id.strip()}
+# --- 新增：添加诊断日志来检查环境变量 ---
+print(f"从 .env 加载的 RESOURCE_CHANNEL_IDS 原始字符串: '{resource_channel_ids_str}'")
+try:
+    RESOURCE_CHANNEL_IDS = {int(id.strip()) for id in resource_channel_ids_str.split(',') if id.strip()}
+    print(f"成功解析并加载了 {len(RESOURCE_CHANNEL_IDS)} 个监听频道 ID。")
+    # 如果ID数量不多，可以取消下面这行注释来查看所有ID
+    # print(f"加载的ID列表: {RESOURCE_CHANNEL_IDS}") 
+except ValueError as e:
+    print(f"错误：解析 RESOURCE_CHANNEL_IDS 时出错！请检查 .env 文件中的 ID 是否为纯数字并用英文逗号分隔。错误信息: {e}")
+    RESOURCE_CHANNEL_IDS = set() # 解析失败时，设置为空集合以防止后续代码出错
+
 
 if not RESOURCE_CHANNEL_IDS:
     print("警告：在 .env 文件中未配置任何有效的 RESOURCE_CHANNEL_IDS！机器人将不会监听任何频道。")
