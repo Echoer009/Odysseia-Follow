@@ -4,8 +4,9 @@ import os
 import asyncio
 import pathlib
 from dotenv import load_dotenv, find_dotenv
-from src.database import Database
-from src.modules.follow_feature.services.follow_service import FollowService
+from src.core.database import Database
+from src.modules.author_follow.services.author_follow_service import AuthorFollowService
+from src.modules.user_profile_feature.services.profile_service import ProfileService
 
 # 使用 find_dotenv() 确保总能找到 .env 文件
 load_dotenv(find_dotenv())
@@ -23,19 +24,33 @@ class MyBot(commands.Bot):
         # 将服务器ID转换为整数并存储，以便后续使用
         self.test_guild_id = int(GUILD_ID) if GUILD_ID else None
         
-        self.db = Database()
-        # 将 follow_service 实例附加到 bot 对象上，以便在 Cogs 中访问
-        self.follow_service = FollowService(self.db)
+        # 2. 更新服务属性的名称和类型提示
+        self.db: Database | None = None
+        self.author_follow_service: AuthorFollowService | None = None
+        self.profile_service: ProfileService | None = None
+
 
     async def setup_hook(self):
-        """这是在机器人登录并准备就绪前自动调用的特殊方法。"""
-        # 初始化数据库
-        await self.db.connect()
-        print("数据库已初始化。")
-
-        # 自动加载所有模块中的 Cogs
-        await self.load_all_cogs()
+        # 3. 更新服务实例化
+        self.db = Database() # 假设你的DB_NAME在env里
+        await self.db.connect() # 假设你的Database类有connect方法
         
+        self.author_follow_service = AuthorFollowService(self.db)
+        self.profile_service = ProfileService(self.db, self.author_follow_service)
+        
+        # 定义要加载的模块列表
+        modules_to_load = [
+            'src.modules.author_follow.cogs.author_tracker',
+            'src.modules.user_profile_feature.cogs.profile_cog',
+        ]
+
+        for module_path in modules_to_load:
+            try:
+                await self.load_extension(module_path) 
+                print(f"✅ 成功加载模块: {module_path}")
+            except Exception as e:
+                print(f"❌ 加载模块 {module_path} 失败: {e}")
+
         # 修改这里的逻辑，使用服务器ID进行同步
         if self.test_guild_id:
             guild = discord.Object(id=self.test_guild_id)
