@@ -38,18 +38,8 @@ class MyBot(commands.Bot):
         self.author_follow_service = AuthorFollowService(self.db)
         self.profile_service = ProfileService(self.db, self.author_follow_service)
         
-        # 定义要加载的模块列表
-        modules_to_load = [
-            'src.modules.author_follow.cogs.author_tracker',
-            'src.modules.user_profile_feature.cogs.profile_cog',
-        ]
-
-        for module_path in modules_to_load:
-            try:
-                await self.load_extension(module_path) 
-                print(f"✅ 成功加载模块: {module_path}")
-            except Exception as e:
-                print(f"❌ 加载模块 {module_path} 失败: {e}")
+        # 调用 load_all_cogs 方法来加载所有模块，而不是使用硬编码列表
+        await self.load_all_cogs()
 
         # 修改这里的逻辑，使用服务器ID进行同步
         if self.test_guild_id:
@@ -66,14 +56,14 @@ class MyBot(commands.Bot):
 
     async def on_ready(self):
         print(f'以 {self.user} (ID: {self.user.id}) 的身份登录')
-        print('------')
+        print('------------------------')
 
     async def load_all_cogs(self):
         """一个健壮的方法，用于查找并加载所有 Cogs。"""
         project_root = pathlib.Path(__file__).parent.parent
         modules_root = project_root / "src" / "modules"
         
-        print("--- 正在加载 Cogs ---")
+        print("--- 正在加载 模块 ---")
         # 递归查找 'modules' 目录下所有 'cogs' 子文件夹中的 .py 文件
         for path in modules_root.rglob("cogs/*.py"):
             if path.name == "__init__.py":
@@ -84,13 +74,13 @@ class MyBot(commands.Bot):
             module_path = ".".join(path.relative_to(project_root).parts).removesuffix(".py")
             try:
                 await self.load_extension(module_path)
-                print(f"  [成功] 已加载: {module_path}")
+                print(f"✅ 已加载: {module_path}")
             except Exception as e:
-                print(f"  [失败] 加载 {module_path} 失败: {e}")
-        print("--- Cogs 加载完毕 ---")
+                print(f"❌ 加载 {module_path} 失败: {e}")
+        print("--- 模块 加载完毕 ---")
 
     def list_loaded_commands(self):
-        """一个新方法，用于打印出所有已注册的应用命令。"""
+        """用于打印出所有已注册的应用命令。"""
         print("--- 已加载的应用命令 ---")
         # 从命令树中获取所有已注册的命令
         commands = self.tree.get_commands()
