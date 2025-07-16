@@ -1,5 +1,6 @@
-import aiosqlite # 1. 导入新的库
+import aiosqlite
 import os
+from datetime import datetime, timezone # 1. 导入 datetime 和 timezone
 
 class Database:
     def __init__(self):
@@ -35,6 +36,22 @@ class Database:
                 followed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(user_id, author_id),
                 FOREIGN KEY(author_id) REFERENCES authors(author_id) ON DELETE CASCADE
+            )
+        """)
+        # 2. 添加新表来记录作者发布的帖子
+        await self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS author_posts (
+                post_id INTEGER PRIMARY KEY,
+                author_id INTEGER NOT NULL,
+                created_at DATETIME NOT NULL,
+                FOREIGN KEY(author_id) REFERENCES authors(author_id) ON DELETE CASCADE
+            )
+        """)
+        # 3. 添加新表来记录用户最后查看的时间
+        await self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_last_view (
+                user_id INTEGER PRIMARY KEY,
+                last_viewed_at DATETIME NOT NULL
             )
         """)
         await self.conn.commit()
@@ -99,4 +116,50 @@ class Database:
         """
         results = await self._execute(sql, (user_id,), fetch='all')
         # 将 Row 对象转换为普通字典列表
+        return [dict(row) for row in results] if results else []
+
+    # 4. 为帖子追踪添加新的数据库方法
+    async def add_post(self, post_id: int, author_id: int, created_at: datetime):
+        """记录作者发布的新帖子"""
+        # 将时区感知的datetime转换为UTC天真时间以便存入SQLite
+        utc_created_at = created_at.astimezone(timezone.utc).replace(tzinfo=None)
+        sql = "INSERT OR IGNORE INTO author_posts (post_id, author_id, created_at) VALUES (?, ?, ?)"
+        await self._execute(sql, (post_id, author_id, utc_created_at))
+
+    async def get_and_update_last_view(self, user_id: int) -> datetime:
+        """获取用户上次查看时间，并更新为当前时间。返回上次查看的时间。"""
+        sql_get = "SELECT last_viewed_at FROM user_last_view WHERE user_id = ?"
+        result = await self._execute(sql_get, (user_id,), fetch='one')
+        
+        last_view_time = datetime(1970, 1, 1) # 如果是第一次查看，返回一个很早的时间
+        if result and result['last_viewed_at']:
+            try:
+                # aiosqlite可能返回字符串，需要转换回datetime对象
+                last_view_time = datetime.fromisoformat(result['last_viewed_at'])
+            except (TypeError, ValueError):
+                # 兼容旧格式
+                last_view_time = datetime.strptime(result['last_viewed_at'], '%Y-%m-%d %H:%M:%S')
+
+        # 将当前时间（UTC）更新到数据库
+        now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+        sql_update = "INSERT OR REPLACE INTO user_last_view (user_id, last_viewed_at) VALUES (?, ?)"
+        await self._execute(sql_update, (user_id, now_utc))
+        
+        return last_view_time
+
+    async def get_new_post_counts(self, author_ids: list[int], since_timestamp: datetime) -> list[dict]:
+        """获取指定作者们在某个时间点之后的新帖子数量"""
+        if not author_ids:
+            return []
+        
+        placeholders = ','.join('?' for _ in author_ids)
+        sql = f"""
+            SELECT author_id, COUNT(post_id) as new_posts_count
+            FROM author_posts
+            WHERE author_id IN ({placeholders}) AND created_at > ?
+            GROUP BY author_id
+        """
+        
+        params = tuple(author_ids) + (since_timestamp,)
+        results = await self._execute(sql, params, fetch='all')
         return [dict(row) for row in results] if results else []
