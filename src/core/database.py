@@ -1,12 +1,24 @@
 import aiosqlite
 import os
-from datetime import datetime, timezone # 1. 导入 datetime 和 timezone
+from datetime import datetime, timezone, timedelta
+import asyncio
+import pathlib
+import logging
+
+logger = logging.getLogger(__name__)
 
 class Database:
     def __init__(self):
         # SQLite 不需要连接池，只需要一个连接对象
         self.conn = None
         self.db_name = os.getenv('DB_NAME')
+        self.backup_folder = os.getenv('BACKUP_FOLDER', 'backups')
+        # 新增：从环境变量读取备份保留天数
+        try:
+            self.backup_retention_days = int(os.getenv('BACKUP_RETENTION_DAYS', '7'))
+        except (ValueError, TypeError):
+            self.backup_retention_days = 7
+
 
     async def connect(self):
         """连接到SQLite数据库文件"""
@@ -18,6 +30,73 @@ class Database:
         await self.conn.commit()
         # 4. 在这里创建数据表（如果它们不存在的话）
         await self.create_tables()
+        logger.info(f"数据库 '{self.db_name}' 连接成功并完成初始化。")
+
+    async def cleanup_old_backups(self):
+        """清理超过指定保留天数的旧备份文件。"""
+        if self.backup_retention_days <= 0:
+            logger.info("备份清理功能已禁用 (保留天数 <= 0)。")
+            return
+
+        backup_dir = pathlib.Path(self.backup_folder)
+        if not backup_dir.is_dir():
+            return
+
+        logger.info(f"开始清理 {self.backup_retention_days} 天前的旧备份...")
+        cutoff_date = datetime.now() - timedelta(days=self.backup_retention_days)
+        cleaned_count = 0
+        
+        for file_path in backup_dir.glob('*_backup_*.db'):
+            try:
+                # 从文件名解析时间戳，例如 '..._backup_20231027_153000.db'
+                timestamp_str = file_path.stem.split('_backup_')[-1]
+                file_date = datetime.strptime(timestamp_str, "%Y%m%d_%H%M%S")
+                
+                if file_date < cutoff_date:
+                    file_path.unlink() # 删除文件
+                    logger.info(f"已删除旧备份: {file_path.name}")
+                    cleaned_count += 1
+            except (ValueError, IndexError) as e:
+                logger.warning(f"无法解析备份文件名或处理文件 '{file_path.name}': {e}")
+        
+        if cleaned_count > 0:
+            logger.info(f"备份清理完成，共删除了 {cleaned_count} 个旧文件。")
+        else:
+            logger.info("没有需要清理的旧备份文件。")
+
+
+    async def backup_database(self):
+        """使用SQLite的在线备份API创建一个安全的数据库备份文件。"""
+        # 0. 在备份前，先执行清理任务
+        await self.cleanup_old_backups()
+
+        # 1. 确保备份目录存在
+        backup_dir = pathlib.Path(self.backup_folder)
+        backup_dir.mkdir(exist_ok=True)
+
+        # 2. 创建带时间戳的备份文件名
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        db_stem = pathlib.Path(self.db_name).stem # 获取不带扩展名的文件名
+        backup_filename = f"{db_stem}_backup_{timestamp}.db"
+        backup_path = backup_dir / backup_filename
+
+        # 3. 使用 aiosqlite 的 backup 功能，这是最安全的方式
+        logger.info(f"正在开始备份数据库到 {backup_path}...")
+        try:
+            async with aiosqlite.connect(backup_path) as backup_conn:
+                await self.conn.backup(backup_conn)
+            logger.info(f"数据库成功备份到: {backup_path}")
+        except Exception as e:
+            logger.error(f"创建数据库备份时出错: {e}", exc_info=True)
+
+    async def start_backup_loop(self, interval_seconds: int):
+        """启动一个循环，按指定间隔备份数据库。"""
+        logger.info("数据库自动备份循环已启动。")
+        while True:
+            # 等待指定的时间间隔
+            await asyncio.sleep(interval_seconds)
+            # 执行备份
+            await self.backup_database()
 
     async def create_tables(self):
         """创建数据库表"""
@@ -70,9 +149,14 @@ class Database:
             return cursor.rowcount
 
     async def ensure_author_exists(self, author_id: int, author_name: str):
-        """确保作者存在于数据库中，如果不存在则创建"""
-        # 'OR IGNORE' 是SQLite中等价于MySQL 'IGNORE'的语法
-        sql = "INSERT OR IGNORE INTO authors (author_id, author_name) VALUES (?, ?)"
+        """确保作者存在于数据库中，如果不存在则创建，如果存在则更新其名称。"""
+        # 使用 SQLite 的 "UPSERT" 语法
+        # ON CONFLICT(author_id) DO UPDATE SET author_name = ...
+        # 这会确保作者名称总是最新的，解决了旧名称不会被更新的问题。
+        sql = """
+            INSERT INTO authors (author_id, author_name) VALUES (?, ?)
+            ON CONFLICT(author_id) DO UPDATE SET author_name = excluded.author_name;
+        """
         await self._execute(sql, (author_id, author_name))
 
     async def add_follower(self, user_id: int, author_id: int, author_name: str) -> bool:
