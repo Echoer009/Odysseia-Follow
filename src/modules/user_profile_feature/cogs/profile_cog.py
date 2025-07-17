@@ -3,21 +3,32 @@ from discord.ext import commands
 from discord import app_commands
 from discord import ui
 import math
-import traceback
+import logging # 新增
+import os # 新增
+
 # 1. 更新导入
 from src.modules.author_follow.services.author_follow_service import AuthorFollowService, UnfollowResult
 from src.modules.user_profile_feature.services.profile_service import ProfileService
 
+logger = logging.getLogger(__name__) # 新增
+
 class FollowsManageView(ui.View):
     # 2. 更新构造函数类型提示
     def __init__(self, author_follow_service: AuthorFollowService, user_id: int, followed_authors: list[dict]):
-        super().__init__(timeout=180)
+        # 从环境变量读取配置，提供默认值
+        try:
+            timeout = int(os.getenv('PROFILE_VIEW_TIMEOUT_SECONDS', '180'))
+            self.page_size = int(os.getenv('PROFILE_VIEW_PAGE_SIZE', '10'))
+        except (ValueError, TypeError):
+            timeout = 180
+            self.page_size = 10
+
+        super().__init__(timeout=timeout)
         self.author_follow_service = author_follow_service
         self.user_id = user_id
         self.all_authors = followed_authors
         
         self.current_page = 0
-        self.page_size = 10
         self.total_pages = math.ceil(len(self.all_authors) / self.page_size) if self.all_authors else 1
 
         self.update_components()
@@ -99,16 +110,14 @@ class FollowsManageView(ui.View):
                 # 更新界面组件
                 self.update_components()
                 success_msg = f"✅ 已成功取关 **{author_name}**。"
-                # 3. 使用 edit_original_response 更新原始消息，这是 defer 后的标准做法
                 await interaction.edit_original_response(embed=self.create_embed(success_msg), view=self)
             else:  # NOT_FOLLOWED
                 self.update_components()
                 error_msg = "🤔 操作失败，您可能已经取关了这位作者。"
                 await interaction.edit_original_response(embed=self.create_embed(error_msg), view=self)
         except Exception as e:
-            # 4. 添加错误捕获，如果中间任何步骤出错，都能给出反馈而不是直接失败
-            print(f"在 select_callback 中发生错误: {e}")
-            traceback.print_exc()
+            # --- 修改这里 ---
+            logger.error(f"在 select_callback 中发生错误: {e}", exc_info=True)
             await interaction.edit_original_response(content="处理您的请求时发生了一个内部错误，请稍后再试。", embed=None, view=None)
 
     async def prev_page(self, interaction: discord.Interaction):
@@ -145,8 +154,8 @@ class UserProfileCog(commands.Cog):
             embed = view.create_embed()
             await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
         except Exception as e:
-            print(f"命令 /我的关注 执行失败: {e}")
-            traceback.print_exc()
+            # --- 修改这里 ---
+            logger.error(f"命令 /我的关注 执行失败: {e}", exc_info=True)
             await interaction.response.send_message("哎呀，操作失败了，好像和数据库的连接出了点问题。请稍后再试或联系管理员。", ephemeral=True)
 
 async def setup(bot: commands.Bot):

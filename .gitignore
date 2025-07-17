@@ -11,3 +11,5 @@ venv/
 
 # Database file
 *.db
+
+logs/

@@ -1,5 +1,6 @@
-from src.core.database import Database # 1. 更新导入路径
+from src.core.database import Database
 from enum import Enum
+from datetime import datetime
 
 class FollowResult(Enum):
     SUCCESS = 1
@@ -14,6 +15,15 @@ class UnfollowResult(Enum):
 class AuthorFollowService:
     def __init__(self, db: Database):
         self.db = db
+
+    async def process_new_thread(self, thread_id: int, author_id: int, author_name: str, created_at: datetime):
+        """
+        处理一个新帖子的完整业务逻辑：
+        1. 确保作者存在
+        2. 记录新帖子
+        """
+        await self.db.ensure_author_exists(author_id, author_name)
+        await self.db.add_post(thread_id, author_id, created_at)
 
     async def follow_author(self, user_id: int, author_id: int, author_name: str) -> FollowResult:
         if user_id == author_id:
