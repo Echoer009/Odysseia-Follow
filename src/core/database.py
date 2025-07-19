@@ -4,6 +4,8 @@ from datetime import datetime, timezone, timedelta
 import asyncio
 import pathlib
 import logging
+import json
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -133,6 +135,34 @@ class Database:
                 last_viewed_at DATETIME NOT NULL
             )
         """)
+        await self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS competitions (
+                message_id INTEGER PRIMARY KEY,
+                channel_id INTEGER NOT NULL,
+                guild_id INTEGER NOT NULL,
+                last_submission_ids TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        await self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS competition_subscriptions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                competition_message_id INTEGER NOT NULL,
+                subscribed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(user_id, competition_message_id),
+                FOREIGN KEY(competition_message_id) REFERENCES competitions(message_id) ON DELETE CASCADE
+            )
+        """)
+        await self.conn.execute("""
+            CREATE TRIGGER IF NOT EXISTS update_competitions_updated_at
+            AFTER UPDATE ON competitions
+            FOR EACH ROW
+            BEGIN
+                UPDATE competitions SET updated_at = CURRENT_TIMESTAMP WHERE message_id = OLD.message_id;
+            END;
+        """)
         await self.conn.commit()
 
     async def _execute(self, query, args=None, fetch=None):
@@ -201,6 +231,66 @@ class Database:
         results = await self._execute(sql, (user_id,), fetch='all')
         # 将 Row 对象转换为普通字典列表
         return [dict(row) for row in results] if results else []
+
+    # --- Competition Follow Methods ---
+
+    async def ensure_competition_exists(self, message_id: int, channel_id: int, guild_id: int, initial_ids: list[str]):
+        """确保比赛记录存在。如果不存在，则创建它。"""
+        ids_json = json.dumps(initial_ids)
+        # 使用 INSERT OR IGNORE 避免在记录已存在时报错
+        sql = """
+            INSERT OR IGNORE INTO competitions (message_id, channel_id, guild_id, last_submission_ids)
+            VALUES (?, ?, ?, ?)
+        """
+        await self._execute(sql, (message_id, channel_id, guild_id, ids_json))
+
+    async def add_competition_subscriber(self, user_id: int, message_id: int) -> bool:
+        """为比赛添加订阅者。返回True表示新订阅，False表示已订阅。"""
+        sql = "INSERT OR IGNORE INTO competition_subscriptions (user_id, competition_message_id) VALUES (?, ?)"
+        rows_affected = await self._execute(sql, (user_id, message_id))
+        return rows_affected > 0
+
+    async def remove_competition_subscriber(self, user_id: int, message_id: int) -> bool:
+        """移除比赛的订阅者。返回True表示成功移除，False表示未订阅。"""
+        sql = "DELETE FROM competition_subscriptions WHERE user_id = ? AND competition_message_id = ?"
+        rows_affected = await self._execute(sql, (user_id, message_id))
+        return rows_affected > 0
+
+    async def get_competition_by_id(self, message_id: int) -> Optional[dict]:
+        """通过message_id获取比赛信息。"""
+        sql = "SELECT * FROM competitions WHERE message_id = ?"
+        result = await self._execute(sql, (message_id,), fetch='one')
+        if result:
+            competition_dict = dict(result)
+            competition_dict['last_submission_ids'] = json.loads(competition_dict['last_submission_ids'])
+            return competition_dict
+        return None
+
+    async def get_subscribers_for_competition(self, message_id: int) -> list[int]:
+        """获取一个比赛的所有订阅者ID。"""
+        sql = "SELECT user_id FROM competition_subscriptions WHERE competition_message_id = ?"
+        results = await self._execute(sql, (message_id,), fetch='all')
+        return [row['user_id'] for row in results] if results else []
+
+    async def update_competition_submissions(self, message_id: int, new_ids: list[str]):
+        """更新比赛的最新作品ID列表。"""
+        ids_json = json.dumps(new_ids)
+        sql = "UPDATE competitions SET last_submission_ids = ? WHERE message_id = ?"
+        await self._execute(sql, (ids_json, message_id))
+
+    async def get_all_followed_competitions(self) -> list[dict]:
+        """获取所有被关注的比赛信息。"""
+        sql = "SELECT * FROM competitions"
+        results = await self._execute(sql, fetch='all')
+        if not results:
+            return []
+        
+        competitions = []
+        for row in results:
+            competition_dict = dict(row)
+            competition_dict['last_submission_ids'] = json.loads(competition_dict['last_submission_ids'])
+            competitions.append(competition_dict)
+        return competitions
 
     # 4. 为帖子追踪添加新的数据库方法
     async def add_post(self, post_id: int, author_id: int, created_at: datetime):
