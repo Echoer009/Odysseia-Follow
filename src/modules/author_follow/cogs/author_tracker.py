@@ -37,11 +37,11 @@ class AuthorTracker(commands.Cog):
         # --- 正确的右键菜单注册方式 ---
         # 1. 创建 ContextMenu 对象并绑定回调
         self.follow_menu = app_commands.ContextMenu(
-            name="关注此消息作者",
+            name="⭐ 关注此消息作者",
             callback=self.follow_this_author_context,
         )
         self.unfollow_menu = app_commands.ContextMenu(
-            name="取关此消息作者",
+            name="➖ 取关此消息作者",
             callback=self.unfollow_this_author_context,
         )
         # 2. 将它们添加到机器人的命令树
@@ -53,7 +53,7 @@ class AuthorTracker(commands.Cog):
         self.bot.tree.remove_command(self.follow_menu.name, type=self.follow_menu.type)
         self.bot.tree.remove_command(self.unfollow_menu.name, type=self.unfollow_menu.type)
 
-    # --- 右键菜单命令的回调方法 (注意：这里没有装饰器) ---
+    # --- 右键菜单命令的回调方法  ---
     async def follow_this_author_context(self, interaction: discord.Interaction, message: discord.Message):
         try:
             author = message.author
@@ -77,7 +77,7 @@ class AuthorTracker(commands.Cog):
     @commands.Cog.listener()
     async def on_thread_create(self, thread: discord.Thread):
         try:
-            # --- 修改这里，从 bot 对象获取配置 ---
+            # --- 从 bot 对象获取配置 ---
             if thread.parent_id not in self.bot.resource_channel_ids:
                 return
             
@@ -201,5 +201,30 @@ class AuthorTracker(commands.Cog):
             logger.error(f"命令 /取关本贴作者 执行失败: {e}", exc_info=True)
             await interaction.response.send_message("哎呀，操作失败了。请稍后再试或联系管理员。", ephemeral=True)
 
+    # --- 开发者专用命令 ---
+    @app_commands.command(name="强制清除所有命令", description="[开发者专用] 清理所有全局应用命令，用于修复重复命令问题。")
+    @commands.is_owner()
+    async def dev_clear_commands(self, interaction: discord.Interaction):
+        """
+        一个危险的命令，用于清除所有全局应用命令。
+        这用于修复重复命令的问题。
+        """
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        logger.warning(f"命令 /强制清除所有命令 由所有者 {interaction.user.id} 调用。正在清理所有全局命令。")
+        
+        try:
+            # 清除所有全局命令
+            self.bot.tree.clear_commands(guild=None)
+            
+            # 将空的命令树同步到 Discord
+            await self.bot.tree.sync()
+            
+            logger.info("已成功清除所有全局命令并与 Discord 同步。")
+            await interaction.followup.send("✅ 所有全局应用命令已成功清理。**请立即重启机器人**以重新注册它们。")
+            
+        except Exception as e:
+            logger.error(f"清理全局命令失败: {e}", exc_info=True)
+            await interaction.followup.send(f"❌ 清理命令时发生错误: {e}")
+ 
 async def setup(bot: commands.Bot):
     await bot.add_cog(AuthorTracker(bot))
