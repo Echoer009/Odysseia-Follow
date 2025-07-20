@@ -5,6 +5,7 @@ from discord.ext import commands, tasks
 from discord import app_commands
 import logging
 import re
+import os
 from typing import Optional
 from src.modules.competition_follow.models import Competition
 from src.modules.competition_follow.services.follow_service import FollowService
@@ -63,8 +64,16 @@ class CompetitionTracker(commands.Cog):
             initial_ids=initial_ids
         )
 
+        log_context = {
+            'user_id': interaction.user.id,
+            'guild_id': message.guild.id,
+            'channel_id': message.channel.id,
+            'message_id': message.id,
+            'success': success
+        }
+        logger.info("用户尝试关注比赛", extra=log_context)
+
         if success:
-            logger.info(f"用户 {interaction.user.id} 开始关注比赛 {message.id}。")
             await interaction.followup.send("✅ **关注成功**！当该杯赛有新作品提交时，您会收到私信通知。", ephemeral=True)
         else:
             await interaction.followup.send("🤔 **重复操作**：您已经关注过这个杯赛了。", ephemeral=True)
@@ -73,8 +82,15 @@ class CompetitionTracker(commands.Cog):
         """处理取消关注比赛的核心逻辑，供所有命令调用。"""
         success = await self.follow_service.unfollow_competition(interaction.user, message_id)
 
+        log_context = {
+            'user_id': interaction.user.id,
+            'guild_id': interaction.guild_id,
+            'message_id': message_id,
+            'success': success
+        }
+        logger.info("用户尝试取关比赛", extra=log_context)
+
         if success:
-            logger.info(f"用户 {interaction.user.id} 取消关注了比赛 {message_id}。")
             await interaction.followup.send("✅ **操作成功**：您已取消关注该杯赛。", ephemeral=True)
         else:
             await interaction.followup.send("🤔 **重复操作**：您之前没有关注过这个杯赛。", ephemeral=True)
@@ -120,10 +136,13 @@ class CompetitionTracker(commands.Cog):
             channel = self.bot.get_channel(channel_id) or await self.bot.fetch_channel(channel_id)
             message = await channel.fetch_message(message_id)
             await self._internal_follow(interaction, message)
-        except (discord.NotFound, discord.Forbidden):
+        except (discord.NotFound, discord.Forbidden) as e:
+            log_context = {'user_id': interaction.user.id, 'guild_id': guild_id, 'channel_id': channel_id, 'message_id': message_id, 'error': str(e)}
+            logger.warning("无法访问斜杠命令所需的消息", extra=log_context)
             await interaction.followup.send("❌ **无法访问**：请检查链接是否正确，以及检查bot是否有权限查看该频道和消息。", ephemeral=True)
         except Exception as e:
-            logger.error(f"Error in /关注比赛 command: {e}", exc_info=True)
+            log_context = {'user_id': interaction.user.id, 'guild_id': guild_id, 'channel_id': channel_id, 'message_id': message_id}
+            logger.error("/关注比赛 命令出错", extra=log_context, exc_info=True)
             await interaction.followup.send("⚙️ **发生未知错误**，请稍后再试或联系管理员。", ephemeral=True)
 
     @app_commands.command(name="取关杯赛", description="通过消息链接取消关注一个杯赛")
@@ -143,26 +162,27 @@ class CompetitionTracker(commands.Cog):
     # Background Task
     # ----------------------------------------------------------------
 
-    @tasks.loop(minutes=1.0)
+    @tasks.loop(minutes=float(os.getenv('COMPETITION_CHECK_INTERVAL_MINUTES', '1.0')))
     async def check_competitions(self):
         """定期轮询检查所有被关注的比赛是否有更新。"""
-        logger.debug("正在执行比赛更新的计划检查...")
+        logger.debug("开始执行比赛更新的计划任务...")
         all_competitions = await self.follow_service.get_all_followed_competitions()
         if not all_competitions:
-            logger.debug("没有正在关注的比赛。跳过检查。")
+            logger.debug("没有正在关注的比赛，跳过检查。")
             return
 
         for competition in all_competitions:
+            log_context = {'competition_message_id': competition.message_id, 'channel_id': competition.channel_id}
             try:
                 channel = self.bot.get_channel(competition.channel_id) or await self.bot.fetch_channel(competition.channel_id)
                 message = await channel.fetch_message(competition.message_id)
                 await self._process_competition_update(message, competition)
             except discord.NotFound:
-                logger.warning(f"在频道 {competition.channel_id} 中未找到比赛消息 {competition.message_id}。它可能已被删除。")
+                logger.warning("比赛消息未找到，可能已被删除。", extra=log_context)
             except discord.Forbidden:
-                logger.error(f"没有权限访问频道 {competition.channel_id} 或消息 {competition.message_id}。")
+                logger.error("访问比赛消息时权限不足。", extra=log_context)
             except Exception as e:
-                logger.error(f"处理比赛 {competition.message_id} 时出错: {e}", exc_info=True)
+                logger.error("处理比赛时发生未知错误。", extra=log_context, exc_info=True)
 
     async def _process_competition_update(self, message: discord.Message, followed_competition: Competition):
         """处理单个比赛的更新检查和通知逻辑。"""
@@ -181,14 +201,20 @@ class CompetitionTracker(commands.Cog):
 
         if not newly_added_ids:
             return
-
-        logger.info(f"在比赛 '{competition_name}' ({message.id}) 发现了 {len(newly_added_ids)} 个新提交: {newly_added_ids}")
+        
+        log_context = {
+            'competition_name': competition_name,
+            'message_id': message.id,
+            'new_submission_count': len(newly_added_ids),
+            'new_submission_ids': newly_added_ids
+        }
+        logger.info("发现比赛有新作品提交", extra=log_context)
 
         subscribers = await self.follow_service.get_subscribers_for_competition(message.id)
         if not subscribers:
-            logger.info(f"比赛 '{competition_name}' ({message.id}) 没有订阅者，跳过通知。")
+            logger.info("此比赛没有订阅者，跳过通知。", extra={'message_id': message.id})
         else:
-            logger.info(f"正在为比赛 '{competition_name}' ({message.id}) 通知 {len(subscribers)} 个订阅者。")
+            logger.info(f"正在通知 {len(subscribers)} 位比赛订阅者。", extra={'message_id': message.id, 'subscriber_count': len(subscribers)})
             for new_id in newly_added_ids:
                 for user_id in subscribers:
                     await self.notification_service.send_new_submission_notification(
@@ -199,7 +225,7 @@ class CompetitionTracker(commands.Cog):
                     )
         
         await self.follow_service.update_submission_state(message.id, new_submission_ids)
-        logger.info(f"已成功更新比赛 '{competition_name}' ({message.id}) 的提交状态。")
+        logger.info("成功更新比赛的提交状态。", extra={'message_id': message.id})
 
     @check_competitions.before_loop
     async def before_check_competitions(self):

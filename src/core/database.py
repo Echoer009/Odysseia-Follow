@@ -30,41 +30,41 @@ class Database:
         # 3. 启用外键约束，SQLite默认是关闭的
         await self.conn.execute("PRAGMA foreign_keys = ON")
         await self.conn.commit()
-        # 4. 在这里创建数据表（如果它们不存在的话）
-        await self.create_tables()
-        logger.info(f"数据库 '{self.db_name}' 连接成功并完成初始化。")
+        # 4. 在这里运行数据库迁移
+        await self._run_migrations()
+        logger.info("数据库连接成功并完成初始化", extra={'db_name': self.db_name})
 
     async def cleanup_old_backups(self):
         """清理超过指定保留天数的旧备份文件。"""
         if self.backup_retention_days <= 0:
-            logger.info("备份清理功能已禁用 (保留天数 <= 0)。")
+            logger.info("备份清理功能已禁用", extra={'retention_days': self.backup_retention_days})
             return
 
         backup_dir = pathlib.Path(self.backup_folder)
         if not backup_dir.is_dir():
             return
 
-        logger.info(f"开始清理 {self.backup_retention_days} 天前的旧备份...")
+        logger.info("开始清理旧备份", extra={'retention_days': self.backup_retention_days})
         cutoff_date = datetime.now() - timedelta(days=self.backup_retention_days)
         cleaned_count = 0
         
         for file_path in backup_dir.glob('*_backup_*.db'):
             try:
-                # 从文件名解析时间戳，例如 '..._backup_20231027_153000.db'
                 timestamp_str = file_path.stem.split('_backup_')[-1]
                 file_date = datetime.strptime(timestamp_str, "%Y%m%d_%H%M%S")
                 
                 if file_date < cutoff_date:
-                    file_path.unlink() # 删除文件
-                    logger.info(f"已删除旧备份: {file_path.name}")
+                    file_path.unlink()
+                    logger.info("已删除旧备份文件", extra={'file_name': file_path.name})
                     cleaned_count += 1
             except (ValueError, IndexError) as e:
-                logger.warning(f"无法解析备份文件名或处理文件 '{file_path.name}': {e}")
+                logger.warning("无法解析或处理备份文件", extra={'file_name': file_path.name}, exc_info=True)
         
+        log_context = {'cleaned_count': cleaned_count}
         if cleaned_count > 0:
-            logger.info(f"备份清理完成，共删除了 {cleaned_count} 个旧文件。")
+            logger.info("备份清理完成", extra=log_context)
         else:
-            logger.info("没有需要清理的旧备份文件。")
+            logger.info("没有需要清理的旧备份文件", extra=log_context)
 
 
     async def backup_database(self):
@@ -83,13 +83,14 @@ class Database:
         backup_path = backup_dir / backup_filename
 
         # 3. 使用 aiosqlite 的 backup 功能，这是最安全的方式
-        logger.info(f"正在开始备份数据库到 {backup_path}...")
+        log_context = {'backup_path': str(backup_path)}
+        logger.info("正在开始备份数据库", extra=log_context)
         try:
             async with aiosqlite.connect(backup_path) as backup_conn:
                 await self.conn.backup(backup_conn)
-            logger.info(f"数据库成功备份到: {backup_path}")
+            logger.info("数据库备份成功", extra=log_context)
         except Exception as e:
-            logger.error(f"创建数据库备份时出错: {e}", exc_info=True)
+            logger.error("数据库备份失败", extra=log_context, exc_info=True)
 
     async def start_backup_loop(self, interval_seconds: int):
         """启动一个循环，按指定间隔备份数据库。"""
@@ -100,70 +101,6 @@ class Database:
             # 执行备份
             await self.backup_database()
 
-    async def create_tables(self):
-        """创建数据库表"""
-        await self.conn.execute("""
-            CREATE TABLE IF NOT EXISTS authors (
-                author_id INTEGER PRIMARY KEY,
-                author_name TEXT,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        await self.conn.execute("""
-            CREATE TABLE IF NOT EXISTS followers (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT NULL,
-                author_id INTEGER NOT NULL,
-                followed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(user_id, author_id),
-                FOREIGN KEY(author_id) REFERENCES authors(author_id) ON DELETE CASCADE
-            )
-        """)
-        # 2. 添加新表来记录作者发布的帖子
-        await self.conn.execute("""
-            CREATE TABLE IF NOT EXISTS author_posts (
-                post_id INTEGER PRIMARY KEY,
-                author_id INTEGER NOT NULL,
-                created_at DATETIME NOT NULL,
-                FOREIGN KEY(author_id) REFERENCES authors(author_id) ON DELETE CASCADE
-            )
-        """)
-        # 3. 添加新表来记录用户最后查看的时间
-        await self.conn.execute("""
-            CREATE TABLE IF NOT EXISTS user_last_view (
-                user_id INTEGER PRIMARY KEY,
-                last_viewed_at DATETIME NOT NULL
-            )
-        """)
-        await self.conn.execute("""
-            CREATE TABLE IF NOT EXISTS competitions (
-                message_id INTEGER PRIMARY KEY,
-                channel_id INTEGER NOT NULL,
-                guild_id INTEGER NOT NULL,
-                last_submission_ids TEXT,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        await self.conn.execute("""
-            CREATE TABLE IF NOT EXISTS competition_subscriptions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT NULL,
-                competition_message_id INTEGER NOT NULL,
-                subscribed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(user_id, competition_message_id),
-                FOREIGN KEY(competition_message_id) REFERENCES competitions(message_id) ON DELETE CASCADE
-            )
-        """)
-        await self.conn.execute("""
-            CREATE TRIGGER IF NOT EXISTS update_competitions_updated_at
-            AFTER UPDATE ON competitions
-            FOR EACH ROW
-            BEGIN
-                UPDATE competitions SET updated_at = CURRENT_TIMESTAMP WHERE message_id = OLD.message_id;
-            END;
-        """)
-        await self.conn.commit()
 
     async def _execute(self, query, args=None, fetch=None):
         """通用的执行函数"""
@@ -337,3 +274,125 @@ class Database:
         params = tuple(author_ids) + (since_timestamp,)
         results = await self._execute(sql, params, fetch='all')
         return [dict(row) for row in results] if results else []
+
+    # --- 关键词关注方法 ---
+
+    async def get_keyword_subscription(self, user_id: int, channel_id: int) -> Optional[dict]:
+        """获取用户在特定频道下的关键词订阅设置。"""
+        sql = "SELECT * FROM keyword_subscriptions WHERE user_id = ? AND channel_id = ?"
+        result = await self._execute(sql, (user_id, channel_id), fetch='one')
+        if not result:
+            return None
+        
+        subscription = dict(result)
+        # 将数据库中的 0/1 转换为布尔值
+        subscription['is_subscribed'] = bool(subscription.get('is_subscribed', 0))
+        subscription['followed_keywords'] = json.loads(subscription.get('followed_keywords') or '[]')
+        subscription['blocked_keywords'] = json.loads(subscription.get('blocked_keywords') or '[]')
+        return subscription
+
+    async def upsert_keyword_subscription(self, user_id: int, channel_id: int, is_subscribed: bool, followed_keywords: list[str], blocked_keywords: list[str]):
+        """创建或更新用户的关键词订阅设置，包括订阅状态。"""
+        followed_json = json.dumps(followed_keywords)
+        blocked_json = json.dumps(blocked_keywords)
+        sql = """
+            INSERT INTO keyword_subscriptions (user_id, channel_id, is_subscribed, followed_keywords, blocked_keywords)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(user_id, channel_id) DO UPDATE SET
+                is_subscribed = excluded.is_subscribed,
+                followed_keywords = excluded.followed_keywords,
+                blocked_keywords = excluded.blocked_keywords;
+        """
+        await self._execute(sql, (user_id, channel_id, is_subscribed, followed_json, blocked_json))
+
+    async def get_all_subscriptions_for_channel(self, channel_id: int) -> list[dict]:
+        """获取特定频道下的所有有效订阅 (is_subscribed = 1)。"""
+        sql = "SELECT * FROM keyword_subscriptions WHERE channel_id = ? AND is_subscribed = 1"
+        results = await self._execute(sql, (channel_id,), fetch='all')
+        if not results:
+            return []
+
+        subscriptions = []
+        for row in results:
+            subscription = dict(row)
+            subscription['is_subscribed'] = True # We already filtered for this
+            subscription['followed_keywords'] = json.loads(subscription.get('followed_keywords') or '[]')
+            subscription['blocked_keywords'] = json.loads(subscription.get('blocked_keywords') or '[]')
+            subscriptions.append(subscription)
+        return subscriptions
+
+    async def get_subscribed_channels_for_user(self, user_id: int) -> list[dict]:
+        """获取用户已订阅的所有频道信息。"""
+        sql = "SELECT * FROM keyword_subscriptions WHERE user_id = ? AND is_subscribed = 1"
+        results = await self._execute(sql, (user_id,), fetch='all')
+        if not results:
+            return []
+        
+        subscriptions = []
+        for row in results:
+            subscription = dict(row)
+            subscription['is_subscribed'] = True
+            subscription['followed_keywords'] = json.loads(subscription.get('followed_keywords') or '[]')
+            subscription['blocked_keywords'] = json.loads(subscription.get('blocked_keywords') or '[]')
+            subscriptions.append(subscription)
+        return subscriptions
+
+    async def _run_migrations(self):
+        """
+        执行基于版本的数据库迁移。
+        此方法会检查 `src/migrations/versions` 目录下的 .sql 文件，
+        并与数据库中存储的 `user_version` 进行比较，然后按顺序应用所有新的迁移。
+        """
+        logger.info("正在检查并运行数据库迁移...")
+        
+        # 1. 获取迁移文件目录
+        # 使用 __file__ 来定位，确保路径的健壮性
+        migrations_path = pathlib.Path(__file__).parent.parent / "migrations" / "versions"
+        if not migrations_path.is_dir():
+            logger.warning(f"迁移目录不存在，跳过迁移: {migrations_path}")
+            return
+
+        # 2. 获取当前数据库版本
+        async with self.conn.cursor() as cursor:
+            await cursor.execute("PRAGMA user_version")
+            current_version = (await cursor.fetchone())[0]
+        logger.info(f"当前数据库版本: {current_version}")
+
+        # 3. 获取所有迁移脚本并排序
+        try:
+            migration_files = sorted(
+                migrations_path.glob("*.sql"),
+                key=lambda p: int(p.stem.split('_')[0])
+            )
+        except (ValueError, IndexError):
+            logger.error("迁移文件名格式不正确，应为 'XXX_description.sql'。")
+            raise
+
+        latest_version = current_version
+        for migration_file in migration_files:
+            try:
+                file_version = int(migration_file.stem.split('_')[0])
+                
+                if file_version > current_version:
+                    logger.info(f"准备应用迁移脚本: v{file_version} - {migration_file.name}")
+                    with open(migration_file, 'r', encoding='utf-8') as f:
+                        sql_script = f.read()
+                    
+                    # aiosqlite 的 executescript 是同步的，但对于 DDL 来说通常没问题
+                    await self.conn.executescript(sql_script)
+                    
+                    # 更新数据库版本
+                    await self.conn.execute(f"PRAGMA user_version = {file_version}")
+                    await self.conn.commit()
+                    
+                    logger.info(f"成功应用迁移脚本并更新数据库版本至: {file_version}")
+                    latest_version = file_version
+            except Exception:
+                logger.error(f"应用迁移脚本失败: {migration_file.name}", exc_info=True)
+                await self.conn.rollback() # 失败时回滚
+                raise # 重新抛出异常，以防止机器人以损坏的数据库状态启动
+
+        if latest_version == current_version:
+            logger.info("数据库结构已是最新，无需迁移。")
+        else:
+            logger.info(f"数据库迁移完成，当前版本为: {latest_version}")

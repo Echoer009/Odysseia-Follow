@@ -6,6 +6,10 @@ import traceback
 import asyncio
 import os
 import logging
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from src.bot import OdysseiaBot
 
 logger = logging.getLogger(__name__)
 
@@ -30,12 +34,11 @@ async def _handle_unfollow_response(interaction: discord.Interaction, result: Un
 
 # --- AuthorTracker Cog ---
 class AuthorTracker(commands.Cog):
-    def __init__(self, bot: commands.Bot):
+    def __init__(self, bot: "OdysseiaBot"):
         self.bot = bot
         self.author_follow_service: AuthorFollowService = bot.author_follow_service
 
         # --- 正确的右键菜单注册方式 ---
-        # 1. 创建 ContextMenu 对象并绑定回调
         self.follow_menu = app_commands.ContextMenu(
             name="⭐ 关注此消息作者",
             callback=self.follow_this_author_context,
@@ -44,7 +47,6 @@ class AuthorTracker(commands.Cog):
             name="➖ 取关此消息作者",
             callback=self.unfollow_this_author_context,
         )
-        # 2. 将它们添加到机器人的命令树
         self.bot.tree.add_command(self.follow_menu)
         self.bot.tree.add_command(self.unfollow_menu)
 
@@ -60,7 +62,13 @@ class AuthorTracker(commands.Cog):
             result = await self.author_follow_service.follow_author(interaction.user.id, author.id, author.name)
             await _handle_follow_response(interaction, result, author)
         except Exception as e:
-            logger.error(f"消息命令 '关注此消息作者' 执行失败: {e}", exc_info=True)
+            log_context = {
+                'user_id': interaction.user.id,
+                'guild_id': interaction.guild_id,
+                'target_user_id': message.author.id,
+                'command': '右键菜单: 关注此消息作者'
+            }
+            logger.error("右键菜单命令执行失败", extra=log_context, exc_info=True)
             if not interaction.response.is_done():
                 await interaction.response.send_message("哎呀，操作失败了。请稍后再试或联系管理员。", ephemeral=True)
 
@@ -70,60 +78,55 @@ class AuthorTracker(commands.Cog):
             result = await self.author_follow_service.unfollow_author(interaction.user.id, author.id)
             await _handle_unfollow_response(interaction, result, author)
         except Exception as e:
-            logger.error(f"消息命令 '取关此消息作者' 执行失败: {e}", exc_info=True)
+            log_context = {
+                'user_id': interaction.user.id,
+                'guild_id': interaction.guild_id,
+                'target_user_id': message.author.id,
+                'command': '右键菜单: 取关此消息作者'
+            }
+            logger.error("右键菜单命令执行失败", extra=log_context, exc_info=True)
             if not interaction.response.is_done():
                 await interaction.response.send_message("哎呀，操作失败了。请稍后再试或联系管理员。", ephemeral=True)
 
     @commands.Cog.listener()
     async def on_thread_create(self, thread: discord.Thread):
         try:
-            # --- 从 bot 对象获取配置 ---
             if thread.parent_id not in self.bot.resource_channel_ids:
                 return
             
-            logger.info(f"检测到受监控频道中的新帖子: '{thread.name}' (ID: {thread.id})")
+            log_context = {
+                'thread_id': thread.id,
+                'thread_name': thread.name,
+                'guild_id': thread.guild.id,
+                'channel_id': thread.parent_id,
+                'author_id': thread.owner_id
+            }
+            logger.info("在受监控频道中检测到新帖子", extra=log_context)
 
             author_id = thread.owner_id
             if not author_id:
                 return
 
-            author = thread.owner
+            author = thread.owner or await self.bot.fetch_user(author_id)
             if not author:
-                try:
-                    author = await self.bot.fetch_user(author_id)
-                except discord.NotFound:
-                    logger.error(f"无法找到 ID 为 {author_id} 的用户，无法记录帖子。")
-                    return
+                logger.warning("无法找到作者用户对象", extra={'author_id': author_id})
+                return
             
-            # --- 调用服务层来处理业务逻辑 ---
             await self.author_follow_service.process_new_thread(
                 thread.id, author.id, author.name, thread.created_at
             )
-            logger.info(f"服务层已处理新帖子，作者: {author.name} ({author.id})")
+            logger.info("服务层已处理新帖子", extra=log_context)
 
-            # --- 通知逻辑 ---
-            parent_name = thread.parent.name if thread.parent else "未知频道"
-            logger.info(f"作者 {author.name} ({author_id}) 在频道 {parent_name} 发布了新帖: {thread.name}")
             follower_ids = await self.author_follow_service.get_author_followers(author_id)
             if not follower_ids:
-                logger.info(f"作者 {author_id} 没有关注者，无需通知。")
                 return
+                
             await self.ghost_ping_users(thread, follower_ids)
         except Exception as e:
-            logger.error(f"处理 on_thread_create 事件时发生错误 (线程ID: {thread.id})", exc_info=True)
+            log_context = {'thread_id': thread.id, 'guild_id': thread.guild.id}
+            logger.error("处理 on_thread_create (作者关注) 时出错", extra=log_context, exc_info=True)
 
     async def ghost_ping_users(self, thread: discord.Thread, user_ids: list[int]):
-        # --- Ghost Ping 风险提示 ---
-        # Ghost Ping (发送提及消息后立刻删除) 是一种灰色地带行为。
-        # 虽然可以有效通知用户，但过度使用或被滥用可能导致机器人被Discord限制或封禁。
-        # 以下措施有助于降低风险：
-        # 1. 合理的分块大小 (chunk_size)
-        # 2. 在每次发送之间设置延迟 (chunk_delay)
-        # 3. 仅在绝对必要时使用
-        # 4. 确保用户是自愿选择接收通知的 (通过关注功能)
-        # ---------------------------------
-        
-        # 从环境变量获取配置，提供合理的默认值
         try:
             initial_delay = int(os.getenv('GHOST_PING_INITIAL_DELAY_SECONDS', '5'))
             chunk_size = int(os.getenv('GHOST_PING_CHUNK_SIZE', '50'))
@@ -131,7 +134,14 @@ class AuthorTracker(commands.Cog):
         except (ValueError, TypeError):
             initial_delay, chunk_size, chunk_delay = 5, 50, 1.5
 
-        logger.info(f"准备在帖子 {thread.id} 中通知 {len(user_ids)} 位用户。初始延迟: {initial_delay}s, 分块大小: {chunk_size}, 块间延迟: {chunk_delay}s。")
+        log_context = {
+            'thread_id': thread.id,
+            'guild_id': thread.guild.id,
+            'total_users': len(user_ids),
+            'chunk_size': chunk_size,
+            'delay': initial_delay
+        }
+        logger.info("准备为作者关注者发送幽灵提及", extra=log_context)
         await asyncio.sleep(initial_delay)
         
         for i in range(0, len(user_ids), chunk_size):
@@ -140,91 +150,58 @@ class AuthorTracker(commands.Cog):
             try:
                 message = await thread.send(ping_message)
                 await message.delete()
-                logger.info(f"成功发送并删除了对 {len(chunk)} 位用户的提及。")
-            except discord.Forbidden:
-                logger.error(f"发送幽灵提及失败：权限不足。请确保机器人在频道 {thread.parent.name} ({thread.parent_id}) 中有 '发送消息' 和 '管理消息' 的权限。")
-                break # 如果没有权限，后续尝试也可能失败，直接中断
+                log_context['chunk_user_ids'] = chunk
+                logger.info("成功为作者关注者发送幽灵提及", extra=log_context)
             except Exception as e:
-                logger.error(f"发送幽灵提及失败: {e}", exc_info=True)
+                log_context['chunk_user_ids'] = chunk
+                logger.error("为作者关注发送幽灵提及失败", extra=log_context, exc_info=True)
             
-            # 在处理完一个分块后等待，以避免API滥用
             if len(user_ids) > chunk_size:
                 await asyncio.sleep(chunk_delay)
 
     @app_commands.command(name="关注本贴作者", description="关注当前帖子的作者以接收作者新帖子的更新通知")
-    @app_commands.checks.cooldown(1, 5.0)
+    @app_commands.checks.cooldown(1, float(os.getenv('FOLLOW_COMMAND_COOLDOWN_SECONDS', '5.0')))
     async def follow_author(self, interaction: discord.Interaction):
         if not isinstance(interaction.channel, discord.Thread):
             await interaction.response.send_message("此命令只能在论坛帖子中使用。", ephemeral=True)
             return
         try:
-            # --- 修改这里，增加健壮性 ---
-            author = interaction.channel.owner
-            # 如果缓存中没有作者信息，尝试从API获取
+            author = interaction.channel.owner or await self.bot.fetch_user(interaction.channel.owner_id)
             if not author:
-                try:
-                    author = await self.bot.fetch_user(interaction.channel.owner_id)
-                except discord.NotFound:
-                    await interaction.response.send_message("❌ 无法找到该帖子的作者信息，操作失败。", ephemeral=True)
-                    return
-            
-            # 如果仍然没有作者信息（非常罕见），则退出
-            if not author:
-                await interaction.response.send_message("❌ 未能获取作者信息，请稍后再试。", ephemeral=True)
+                await interaction.response.send_message("❌ 无法找到该帖子的作者信息，操作失败。", ephemeral=True)
                 return
 
             result = await self.author_follow_service.follow_author(interaction.user.id, author.id, author.name)
             await _handle_follow_response(interaction, result, author)
         except Exception as e:
-            logger.error(f"命令 /关注本贴作者 执行失败: {e}", exc_info=True)
+            log_context = {
+                'user_id': interaction.user.id,
+                'guild_id': interaction.guild_id,
+                'channel_id': interaction.channel_id,
+                'command': '/关注本贴作者'
+            }
+            logger.error("斜杠命令执行失败", extra=log_context, exc_info=True)
             await interaction.response.send_message("哎呀，操作失败了。请稍后再试或联系管理员。", ephemeral=True)
 
     @app_commands.command(name="取关本贴作者", description="取消关注当前帖子的作者")
-    @app_commands.checks.cooldown(1, 5.0)
+    @app_commands.checks.cooldown(1, float(os.getenv('FOLLOW_COMMAND_COOLDOWN_SECONDS', '5.0')))
     async def unfollow_author(self, interaction: discord.Interaction):
         if not isinstance(interaction.channel, discord.Thread):
             await interaction.response.send_message("❌ 此命令只能在论坛帖子中使用。", ephemeral=True)
             return
         try:
-            author = interaction.channel.owner
-            if not author:
-                try:
-                    # 如果缓存中没有，尝试从API获取
-                    author = await self.bot.fetch_user(interaction.channel.owner_id)
-                except discord.NotFound:
-                    # 即使找不到用户信息，仍然可以尝试用ID取关
-                    pass # 此时 author 依然是 None，后续会显示“未知作者”，但操作可以继续
-
+            author = interaction.channel.owner or await self.bot.fetch_user(interaction.channel.owner_id)
             result = await self.author_follow_service.unfollow_author(interaction.user.id, interaction.channel.owner_id)
             await _handle_unfollow_response(interaction, result, author)
         except Exception as e:
-            logger.error(f"命令 /取关本贴作者 执行失败: {e}", exc_info=True)
+            log_context = {
+                'user_id': interaction.user.id,
+                'guild_id': interaction.guild_id,
+                'channel_id': interaction.channel_id,
+                'command': '/取关本贴作者'
+            }
+            logger.error("斜杠命令执行失败", extra=log_context, exc_info=True)
             await interaction.response.send_message("哎呀，操作失败了。请稍后再试或联系管理员。", ephemeral=True)
 
-    # --- 开发者专用命令 ---
-    @app_commands.command(name="强制清除所有命令", description="[开发者专用] 清理所有全局应用命令，用于修复重复命令问题。")
-    @commands.is_owner()
-    async def dev_clear_commands(self, interaction: discord.Interaction):
-        """
-        一个危险的命令，用于清除所有全局应用命令。
-        这用于修复重复命令的问题。
-        """
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        logger.warning(f"命令 /强制清除所有命令 由所有者 {interaction.user.id} 调用。正在清理所有全局命令。")
-        
-        try:
-            # 清除所有全局命令
-            self.bot.tree.clear_commands(guild=None)
-            
-            # 将空的命令树同步到 Discord
-            await self.bot.tree.sync()
-            
-            logger.info("已成功清除所有全局命令并与 Discord 同步。")
-            await interaction.followup.send("✅ 所有全局应用命令已成功清理。**请立即重启机器人**以重新注册它们。")
-            
-        except Exception as e:
-            logger.error(f"清理全局命令失败: {e}", exc_info=True)
-            await interaction.followup.send(f"❌ 清理命令时发生错误: {e}")
- 
-async def setup(bot: commands.Bot):
+async def setup(bot: "OdysseiaBot"):
     await bot.add_cog(AuthorTracker(bot))
