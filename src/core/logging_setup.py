@@ -2,6 +2,7 @@ import logging
 import sys
 import os
 from logging.handlers import TimedRotatingFileHandler
+from pythonjsonlogger import jsonlogger
 
 def setup_logging():
     """
@@ -12,37 +13,46 @@ def setup_logging():
     root_logger = logging.getLogger()
     
     if root_logger.hasHandlers():
+        # 如果已经有处理器，假设已经配置过，直接返回
         return
 
     root_logger.setLevel(logging.INFO)
 
-    # --- 核心改动：定义一个新的、更简洁的格式化器 ---
-    # 新格式: 2025-07-18 01:55:10 [INFO] 消息内容
-    formatter = logging.Formatter(
-        '%(asctime)s [%(levelname)s] %(message)s',
+    # --- 控制台格式化器 (人类可读) ---
+    console_formatter = logging.Formatter(
+        '%(asctime)s [%(levelname)-5s] %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S'
+    )
+
+    # --- 文件格式化器 (JSON) ---
+    json_formatter = jsonlogger.JsonFormatter(
+        '%(asctime)s %(levelname)s %(message)s',
+        rename_fields={
+            'asctime': 'timestamp',
+            'levelname': 'level'
+        }
     )
 
     # --- 确保日志目录存在 ---
     if not os.path.exists('logs'):
         os.makedirs('logs')
 
-    # 创建控制台处理器
+    # --- 创建控制台处理器 ---
     console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setFormatter(formatter)
+    console_handler.setFormatter(console_formatter)
     root_logger.addHandler(console_handler)
 
-    # 创建文件处理器 (每天轮换)
-    # 文件日志可以保留更详细的信息，方便排错
-    file_formatter = logging.Formatter(
-        '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S'
-    )
+    # --- 创建文件处理器 (JSON) ---
+    log_interval = int(os.getenv('LOG_ROTATION_INTERVAL_DAYS', '1'))
+    log_backup_count = int(os.getenv('LOG_BACKUP_COUNT', '7'))
     file_handler = TimedRotatingFileHandler(
-        'logs/bot.log', when='midnight', interval=1, backupCount=7, encoding='utf-8'
+        'logs/bot.log', when='midnight', interval=log_interval, backupCount=log_backup_count, encoding='utf-8'
     )
-    file_handler.setFormatter(file_formatter)
+    file_handler.setFormatter(json_formatter) # 使用 JSON 格式化器
     root_logger.addHandler(file_handler)
 
-    # 仅在第一次配置时打印此消息
-    # root_logger.info("日志系统已配置完成。") # 这条消息可以注释掉，让启动更干净
+    # 设置 discord.py 内部 logger 的级别
+    logging.getLogger('discord').setLevel(logging.INFO)
+    logging.getLogger('discord.http').setLevel(logging.WARNING)
+
+    root_logger.info("日志系统初始化完成 (控制台: text, 文件: json)")

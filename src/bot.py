@@ -7,6 +7,7 @@ from dotenv import load_dotenv, find_dotenv
 from src.core.database import Database
 from src.modules.author_follow.services.author_follow_service import AuthorFollowService
 from src.modules.user_profile_feature.services.profile_service import ProfileService
+from src.modules.channel_subscription.services.subscription_service import SubscriptionService
 import logging
 from src.core.logging_setup import setup_logging
 
@@ -44,6 +45,7 @@ class MyBot(commands.Bot):
         self.db: Database | None = None
         self.author_follow_service: AuthorFollowService | None = None
         self.profile_service: ProfileService | None = None
+        self.subscription_service: SubscriptionService | None = None
         self.db_backup_task: asyncio.Task | None = None # 新增：用于存储备份任务
 
     def _load_resource_channels(self) -> set[int]:
@@ -73,6 +75,7 @@ class MyBot(commands.Bot):
         
         self.author_follow_service = AuthorFollowService(self.db)
         self.profile_service = ProfileService(self.db, self.author_follow_service)
+        self.subscription_service = SubscriptionService(self.db)
         logger.info("数据库和服务已成功初始化。")
 
         # --- 2. 启动数据库备份任务 ---
@@ -114,19 +117,25 @@ class MyBot(commands.Bot):
     async def close(self):
         """在机器人关闭时，优雅地清理资源。"""
         logger.info("正在关闭机器人并清理资源...")
-        # 1. 取消后台任务
+
+        # 1. 首先，调用父类的 close 方法。
+        # 这会优雅地断开与 Discord 的连接，并停止所有内部任务（如心跳）。
+        # 这是解决 "Event loop is closed" 错误的关键。
+        await super().close()
+        logger.info("Discord 客户端已成功关闭。")
+
+        # 2. 在 Discord 连接关闭后，再清理我们自己的资源。
+        # 取消我们自己创建的后台任务
         if self.db_backup_task and not self.db_backup_task.done():
             self.db_backup_task.cancel()
             logger.info("数据库备份任务已取消。")
-        
-        # 2. 关闭数据库连接
+
+        # 关闭数据库连接
         if self.db and self.db.conn:
             await self.db.conn.close()
             logger.info("数据库连接已关闭。")
         
-        # 3. 调用父类的 close 方法
-        await super().close()
-        logger.info("机器人已成功关闭。")
+        logger.info("所有自定义资源已成功清理，机器人已完全关闭。")
 
     async def load_all_cogs(self):
         """一个健壮的方法，用于查找并加载所有 Cogs。"""
@@ -137,7 +146,7 @@ class MyBot(commands.Bot):
         logger.info("--- 正在加载 模块 ---")
         # 递归查找 'modules' 目录下所有 'cogs' 子文件夹中的 .py 文件
         for path in modules_root.rglob("cogs/*.py"):
-            if path.name == "__init__.py":
+            if path.name == "__init__.py" or path.name == "views.py":
                 continue
             
             # 将文件路径转换为 Python 模块路径
@@ -174,16 +183,27 @@ async def main():
     bot = MyBot()
     
     try:
+        # bot.start() 会一直运行，直到机器人断开或被关闭。
         await bot.start(TOKEN)
     except discord.errors.LoginFailure:
         logger.critical("错误：提供的 DISCORD_TOKEN 无效。请检查 .env 文件。")
     except Exception as e:
+        # 捕获其他潜在的启动错误
         logger.critical(f"机器人启动时发生致命错误: {e}", exc_info=True)
-
+    finally:
+        # 无论 try 块如何退出（正常结束、异常、或被 Ctrl+C 取消），
+        # finally 块都会执行。这是确保资源被释放的关键。
+        if not bot.is_closed():
+            logger.info("检测到程序即将退出，正在优雅地关闭机器人...")
+            await bot.close()
 
 if __name__ == "__main__":
     try:
+        # asyncio.run() 会优雅地处理 KeyboardInterrupt。
+        # 它会取消 main() 任务，等待其完成（包括 finally 块），然后关闭事件循环。
         asyncio.run(main())
     except KeyboardInterrupt:
-        # 使用logger而不是print
-        logging.getLogger(__name__).info("机器人正在关闭。")
+        # 这个捕获块现在主要是为了提供一个清晰的退出信息，
+        # 并防止向用户显示不必要的堆栈跟踪。
+        # 此时，main() 中的 finally 块应该已经执行完毕。
+        logging.getLogger(__name__).info("程序已干净地退出。")
