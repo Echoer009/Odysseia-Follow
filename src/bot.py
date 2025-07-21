@@ -8,6 +8,8 @@ from src.core.database import Database
 from src.modules.author_follow.services.author_follow_service import AuthorFollowService
 from src.modules.user_profile_feature.services.profile_service import ProfileService
 from src.modules.channel_subscription.services.subscription_service import SubscriptionService
+from src.modules.thread_favorites.services.favorites_service import FavoritesService
+from src.modules.thread_favorites.services.scanner_service import ActiveThreadScanner
 import logging
 from src.core.logging_setup import setup_logging
 
@@ -46,7 +48,9 @@ class MyBot(commands.Bot):
         self.author_follow_service: AuthorFollowService | None = None
         self.profile_service: ProfileService | None = None
         self.subscription_service: SubscriptionService | None = None
-        self.db_backup_task: asyncio.Task | None = None # 新增：用于存储备份任务
+        self.favorites_service: FavoritesService | None = None
+        self.db_backup_task: asyncio.Task | None = None
+        self.scanner_service: ActiveThreadScanner | None = None
 
     def _load_resource_channels(self) -> set[int]:
         """从环境变量加载并解析需要监听的频道ID"""
@@ -76,10 +80,13 @@ class MyBot(commands.Bot):
         self.author_follow_service = AuthorFollowService(self.db)
         self.profile_service = ProfileService(self.db, self.author_follow_service)
         self.subscription_service = SubscriptionService(self.db)
+        self.favorites_service = FavoritesService(self.db)
+        self.scanner_service = ActiveThreadScanner(self, self.db)
         logger.info("数据库和服务已成功初始化。")
 
-        # --- 2. 启动数据库备份任务 ---
+        # --- 2. 启动后台任务 ---
         await self.start_db_backup_task()
+        await self.start_scanner_service_task()
 
         # --- 3. 加载所有模块/Cogs ---
         await self.load_all_cogs()
@@ -114,6 +121,17 @@ class MyBot(commands.Bot):
         else:
             logger.warning("数据库自动备份已禁用（未配置或间隔为0）。")
 
+    async def start_scanner_service_task(self):
+        """从环境变量读取配置并启动活跃帖子扫描的后台任务。"""
+        scanner_interval_hours_str = os.getenv('SCANNER_INTERVAL_HOURS')
+        if scanner_interval_hours_str and scanner_interval_hours_str.isdigit() and int(scanner_interval_hours_str) > 0:
+            interval_hours = int(scanner_interval_hours_str)
+            interval_seconds = interval_hours * 3600
+            self.scanner_service.start(interval_seconds)
+            logger.info(f"已启动活跃帖子扫描任务，间隔为 {interval_hours} 小时。")
+        else:
+            logger.warning("活跃帖子扫描任务已禁用（未配置或间隔为0）。")
+
     async def close(self):
         """在机器人关闭时，优雅地清理资源。"""
         logger.info("正在关闭机器人并清理资源...")
@@ -129,6 +147,10 @@ class MyBot(commands.Bot):
         if self.db_backup_task and not self.db_backup_task.done():
             self.db_backup_task.cancel()
             logger.info("数据库备份任务已取消。")
+        
+        if self.scanner_service and self.scanner_service.task and not self.scanner_service.task.done():
+            self.scanner_service.stop()
+            logger.info("活跃帖子扫描任务已停止。")
 
         # 关闭数据库连接
         if self.db and self.db.conn:

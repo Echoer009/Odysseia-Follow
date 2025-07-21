@@ -22,7 +22,7 @@ class UserProfileCog(commands.Cog):
         self.author_follow_service: AuthorFollowService = bot.author_follow_service
         self.profile_service: ProfileService = bot.profile_service
 
-    @app_commands.command(name="我的关注", description="在私信中管理您关注的作者和频道订阅")
+    @app_commands.command(name="我的关注", description="在面板中管理您关注的作者,频道和收藏夹")
     async def my_follows(self, interaction: discord.Interaction):
         try:
             # Defer interaction to avoid timeout, and make it thinking
@@ -32,15 +32,8 @@ class UserProfileCog(commands.Cog):
             view = MainMenuView(self)
             embed = view.create_embed()
 
-            # Send the view to the user's DMs
+            # Send the view to the user
             await interaction.followup.send(embed=embed, view=view, ephemeral=True)
-
-        except discord.Forbidden:
-            # This exception is less likely now but kept for safety.
-            await interaction.followup.send(
-                "❌ 我无法给你发送私信。请检查你的隐私设置（允许来自服务器成员的私信）然后重试。",
-                ephemeral=True
-            )
         except Exception as e:
             log_context = {
                 'user_id': interaction.user.id,

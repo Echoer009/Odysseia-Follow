@@ -337,6 +337,163 @@ class Database:
             subscriptions.append(subscription)
         return subscriptions
 
+    # --- Thread Favorites Methods ---
+
+    async def add_favorite(self, user_id: int, thread_id: int, thread_name: str, guild_id: int, added_at: datetime) -> bool:
+        """将一个帖子添加到用户的收藏夹。返回True表示新收藏，False表示已存在。"""
+        sql = """
+            INSERT OR IGNORE INTO thread_favorites (user_id, thread_id, thread_name, guild_id, added_at)
+            VALUES (?, ?, ?, ?, ?)
+        """
+        rows_affected = await self._execute(sql, (user_id, thread_id, thread_name, guild_id, added_at))
+        return rows_affected > 0
+
+    async def remove_favorite(self, user_id: int, thread_id: int) -> bool:
+        """从用户的收藏夹中移除一个帖子。返回True表示成功移除，False表示不存在。"""
+        sql = "DELETE FROM thread_favorites WHERE user_id = ? AND thread_id = ?"
+        rows_affected = await self._execute(sql, (user_id, thread_id))
+        return rows_affected > 0
+
+    async def get_user_favorites_paginated(self, user_id: int, limit: int, offset: int) -> list[dict]:
+        """分页获取用户的收藏帖子列表。"""
+        sql = """
+            SELECT thread_id, thread_name, guild_id, added_at
+            FROM thread_favorites
+            WHERE user_id = ?
+            ORDER BY added_at DESC
+            LIMIT ? OFFSET ?
+        """
+        results = await self._execute(sql, (user_id, limit, offset), fetch='all')
+        if not results:
+            return []
+        
+        # 将 added_at 字符串转换为 datetime 对象
+        processed_results = []
+        for row in results:
+            row_dict = dict(row)
+            if row_dict.get('added_at'):
+                try:
+                    row_dict['added_at'] = datetime.fromisoformat(row_dict['added_at'])
+                except (TypeError, ValueError):
+                    # 添加一个备用解析，以防万一数据库中存在旧格式
+                    try:
+                        row_dict['added_at'] = datetime.strptime(row_dict['added_at'], '%Y-%m-%d %H:%M:%S.%f')
+                    except ValueError:
+                         row_dict['added_at'] = datetime.strptime(row_dict['added_at'], '%Y-%m-%d %H:%M:%S')
+
+            processed_results.append(row_dict)
+            
+        return processed_results
+
+    async def get_user_favorites_count(self, user_id: int) -> int:
+        """获取用户收藏的帖子总数。"""
+        sql = "SELECT COUNT(id) FROM thread_favorites WHERE user_id = ?"
+        result = await self._execute(sql, (user_id,), fetch='one')
+        return result[0] if result else 0
+    
+    async def get_all_user_favorite_thread_ids(self, user_id: int) -> list[int]:
+        """获取用户收藏的所有帖子 ID。"""
+        sql = "SELECT thread_id FROM thread_favorites WHERE user_id = ?"
+        results = await self._execute(sql, (user_id,), fetch='all')
+        return [row['thread_id'] for row in results] if results else []
+
+    async def add_favorites_in_batch(self, favorites_data: list[tuple]):
+        """
+        批量添加收藏。
+        favorites_data 是一个元组列表，每个元组包含 (user_id, thread_id, thread_name, guild_id, added_at)
+        """
+        sql = """
+            INSERT OR IGNORE INTO thread_favorites (user_id, thread_id, thread_name, guild_id, added_at)
+            VALUES (?, ?, ?, ?, ?)
+        """
+        # executemany 是批量操作的最佳方式
+        async with self.conn.cursor() as cursor:
+            await cursor.executemany(sql, favorites_data)
+            await self.conn.commit()
+
+    async def remove_favorites_in_batch(self, user_id: int, thread_ids: list[int]) -> int:
+        """
+        批量移除收藏。
+        返回成功移除的收藏数量。
+        """
+        if not thread_ids:
+            return 0
+        
+        placeholders = ','.join('?' for _ in thread_ids)
+        sql = f"DELETE FROM thread_favorites WHERE user_id = ? AND thread_id IN ({placeholders})"
+        
+        params = (user_id,) + tuple(thread_ids)
+        rows_affected = await self._execute(sql, params)
+        return rows_affected
+
+    # --- Active Thread Scanner Methods ---
+
+    async def clear_active_thread_members(self, guild_id: int):
+        """清除指定服务器的所有活跃帖子-成员关系记录。"""
+        sql = "DELETE FROM active_thread_members WHERE guild_id = ?"
+        await self._execute(sql, (guild_id,))
+
+    async def update_active_thread_members(self, thread_id: int, member_ids: list[int], guild_id: int):
+        """
+        使用 UPSERT 语法批量更新或插入一个帖子的成员列表。
+        这可以确保数据是最新的，并且避免了重复记录。
+        """
+        now = datetime.now(timezone.utc)
+        data = [(thread_id, user_id, guild_id, now) for user_id in member_ids]
+        
+        sql = """
+            INSERT INTO active_thread_members (thread_id, user_id, guild_id, last_seen)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(thread_id, user_id) DO UPDATE SET
+                last_seen = excluded.last_seen;
+        """
+        async with self.conn.cursor() as cursor:
+            await cursor.executemany(sql, data)
+            await self.conn.commit()
+
+    async def get_user_active_threads(self, user_id: int, guild_id: int) -> list[dict]:
+        """
+        获取用户所在的所有活跃帖子的ID和名称。
+        使用 LEFT JOIN 从 thread_favorites 获取名称，如果帖子未被收藏，则名称为 NULL。
+        """
+        sql = """
+            SELECT
+                atm.thread_id,
+                tf.thread_name
+            FROM active_thread_members atm
+            LEFT JOIN thread_favorites tf ON atm.thread_id = tf.thread_id AND atm.user_id = tf.user_id
+            WHERE atm.user_id = ? AND atm.guild_id = ?
+        """
+        results = await self._execute(sql, (user_id, guild_id), fetch='all')
+        return [dict(row) for row in results] if results else []
+
+    async def get_unfavorited_active_threads(self, user_id: int, guild_id: int) -> list[dict]:
+        """
+        获取用户已加入但尚未收藏的活跃帖子列表（ID和名称）。
+        这通过查找在 active_thread_members 中但不在 thread_favorites 中的记录来实现。
+        注意：由于我们没有在 active_thread_members 中存储名字，所以 thread_name 将为 NULL。
+        我们需要在调用方处理这种情况。
+        """
+        sql = """
+            SELECT atm.thread_id, NULL as thread_name
+            FROM active_thread_members atm
+            WHERE atm.user_id = ?
+              AND atm.guild_id = ?
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM thread_favorites tf
+                  WHERE tf.user_id = atm.user_id AND tf.thread_id = atm.thread_id
+              )
+        """
+        results = await self._execute(sql, (user_id, guild_id), fetch='all')
+        return [dict(row) for row in results] if results else []
+
+
+    async def remove_active_thread_member(self, user_id: int, thread_id: int):
+        """从活跃帖子成员缓存中移除一个特定的用户-帖子关系。"""
+        sql = "DELETE FROM active_thread_members WHERE user_id = ? AND thread_id = ?"
+        await self._execute(sql, (user_id, thread_id))
+
     async def _run_migrations(self):
         """
         执行基于版本的数据库迁移。
