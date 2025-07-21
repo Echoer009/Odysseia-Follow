@@ -17,7 +17,7 @@ class ActiveThreadScanner:
         try:
             members = await thread.fetch_members()
             member_ids = [member.id for member in members]
-            await self.db.update_active_thread_members(thread.id, member_ids, guild_id)
+            await self.db.update_active_thread_members(thread.id, thread.name, member_ids, guild_id)
             return thread, len(member_ids), None
         except discord.HTTPException as e:
             logger.warning(f"获取帖子 '{thread.name}' 的成员失败: {e}。跳过此帖。")
