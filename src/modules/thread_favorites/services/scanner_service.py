@@ -1,3 +1,4 @@
+import os
 import discord
 import asyncio
 import logging
@@ -10,7 +11,13 @@ class ActiveThreadScanner:
         self.bot = bot
         self.db = db
         self.task: asyncio.Task = None
-        self.CONCURRENT_TASKS = 10  # 并发处理的任务数量
+        try:
+            self.concurrent_tasks = int(os.getenv('SCANNER_CONCURRENT_TASKS', '25'))
+            self.chunk_delay = float(os.getenv('SCANNER_CHUNK_DELAY_SECONDS', '0.5'))
+        except (ValueError, TypeError):
+            self.concurrent_tasks = 25
+            self.chunk_delay = 0.5
+        logger.info(f"扫描服务已配置：并发数={self.concurrent_tasks}, 批次延迟={self.chunk_delay}s")
 
     async def _process_thread(self, thread: discord.Thread, guild_id: int):
         """处理单个帖子的逻辑。"""
@@ -49,8 +56,8 @@ class ActiveThreadScanner:
         await self.db.clear_active_thread_members(guild.id)
         
         processed_count = 0
-        for i in range(0, total_threads, self.CONCURRENT_TASKS):
-            chunk = active_threads[i:i + self.CONCURRENT_TASKS]
+        for i in range(0, total_threads, self.concurrent_tasks):
+            chunk = active_threads[i:i + self.concurrent_tasks]
             tasks = [self._process_thread(thread, guild.id) for thread in chunk]
             
             results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -67,9 +74,9 @@ class ActiveThreadScanner:
                     else:
                         logger.info(f"({processed_count}/{total_threads}) 已处理 '{thread.name}'，找到 {member_count} 个成员。")
             
-            if i + self.CONCURRENT_TASKS < total_threads:
-                logger.debug(f"完成一个批次的处理，等待1秒后继续...")
-                await asyncio.sleep(1)
+            if i + self.concurrent_tasks < total_threads:
+                logger.debug(f"完成一个批次的处理，等待{self.chunk_delay}秒后继续...")
+                await asyncio.sleep(self.chunk_delay)
 
         logger.info(f"服务器 '{guild.name}' 的活跃帖子扫描完成。")
 
