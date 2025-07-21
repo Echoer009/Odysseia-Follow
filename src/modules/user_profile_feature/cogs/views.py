@@ -501,7 +501,7 @@ class FavoritesManageView(ui.View):
         if not unfavorited_threads_data:
             embed = discord.Embed(
                 title="📥 批量收藏",
-                description="✅ 您已经收藏了所有你加入的帖子，没有需要新收藏的了！",
+                description="✅ 您已经收藏了所有你加入的帖子，没有需要新收藏的了！如果您想收藏没有加入的帖子,请使用右键命令",
                 color=int(os.getenv('THEME_COLOR', '0x49989a'), 16)
             )
             await interaction.edit_original_response(content="", embed=embed, view=self)

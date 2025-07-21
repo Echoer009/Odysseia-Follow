@@ -433,19 +433,20 @@ class Database:
         sql = "DELETE FROM active_thread_members WHERE guild_id = ?"
         await self._execute(sql, (guild_id,))
 
-    async def update_active_thread_members(self, thread_id: int, member_ids: list[int], guild_id: int):
+    async def update_active_thread_members(self, thread_id: int, thread_name: str, member_ids: list[int], guild_id: int):
         """
-        使用 UPSERT 语法批量更新或插入一个帖子的成员列表。
+        使用 UPSERT 语法批量更新或插入一个帖子的成员列表，包括帖子名称。
         这可以确保数据是最新的，并且避免了重复记录。
         """
         now = datetime.now(timezone.utc)
-        data = [(thread_id, user_id, guild_id, now) for user_id in member_ids]
+        data = [(thread_id, user_id, guild_id, now, thread_name) for user_id in member_ids]
         
         sql = """
-            INSERT INTO active_thread_members (thread_id, user_id, guild_id, last_seen)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO active_thread_members (thread_id, user_id, guild_id, last_seen, thread_name)
+            VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(thread_id, user_id) DO UPDATE SET
-                last_seen = excluded.last_seen;
+                last_seen = excluded.last_seen,
+                thread_name = excluded.thread_name;
         """
         async with self.conn.cursor() as cursor:
             await cursor.executemany(sql, data)
@@ -454,15 +455,14 @@ class Database:
     async def get_user_active_threads(self, user_id: int, guild_id: int) -> list[dict]:
         """
         获取用户所在的所有活跃帖子的ID和名称。
-        使用 LEFT JOIN 从 thread_favorites 获取名称，如果帖子未被收藏，则名称为 NULL。
+        现在直接从 active_thread_members 表中获取名称。
         """
         sql = """
             SELECT
-                atm.thread_id,
-                tf.thread_name
-            FROM active_thread_members atm
-            LEFT JOIN thread_favorites tf ON atm.thread_id = tf.thread_id AND atm.user_id = tf.user_id
-            WHERE atm.user_id = ? AND atm.guild_id = ?
+                thread_id,
+                thread_name
+            FROM active_thread_members
+            WHERE user_id = ? AND guild_id = ?
         """
         results = await self._execute(sql, (user_id, guild_id), fetch='all')
         return [dict(row) for row in results] if results else []
@@ -471,11 +471,12 @@ class Database:
         """
         获取用户已加入但尚未收藏的活跃帖子列表（ID和名称）。
         这通过查找在 active_thread_members 中但不在 thread_favorites 中的记录来实现。
-        注意：由于我们没有在 active_thread_members 中存储名字，所以 thread_name 将为 NULL。
-        我们需要在调用方处理这种情况。
+        现在可以直接从 active_thread_members 表获取名称。
         """
         sql = """
-            SELECT atm.thread_id, NULL as thread_name
+            SELECT
+                atm.thread_id,
+                atm.thread_name
             FROM active_thread_members atm
             WHERE atm.user_id = ?
               AND atm.guild_id = ?
