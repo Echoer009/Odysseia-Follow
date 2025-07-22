@@ -554,3 +554,22 @@ class Database:
             logger.info("数据库结构已是最新，无需迁移。")
         else:
             logger.info(f"数据库迁移完成，当前版本为: {latest_version}")
+
+    # --- Thread Join Queue Methods ---
+
+    async def add_thread_to_join_queue(self, thread_id: int, guild_id: int):
+        """将一个帖子ID添加到待加入队列中，如果已存在则忽略。"""
+        sql = "INSERT OR IGNORE INTO thread_join_queue (thread_id, guild_id) VALUES (?, ?)"
+        await self._execute(sql, (thread_id, guild_id))
+
+    async def get_oldest_thread_from_join_queue(self) -> Optional[tuple[int, int]]:
+        """从队列中获取一个状态为 'pending' 的最老的帖子ID和其服务器ID。"""
+        sql = "SELECT thread_id, guild_id FROM thread_join_queue WHERE status = 'pending' ORDER BY added_at ASC LIMIT 1"
+        row = await self._execute(sql, fetch='one')
+        return (row['thread_id'], row['guild_id']) if row else None
+
+    async def update_join_queue_status(self, thread_id: int, status: str):
+        """更新队列中一个帖子的状态和最后尝试时间。"""
+        now_utc = datetime.now(timezone.utc)
+        sql = "UPDATE thread_join_queue SET status = ?, last_attempted_at = ? WHERE thread_id = ?"
+        await self._execute(sql, (status, now_utc, thread_id))

@@ -20,7 +20,7 @@ def setup_logging():
 
     # --- 控制台格式化器 (人类可读) ---
     console_formatter = logging.Formatter(
-        '%(asctime)s [%(levelname)-5s] %(message)s',
+        '%(asctime)s [%(levelname)s] %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S'
     )
 
@@ -52,7 +52,7 @@ def setup_logging():
     root_logger.addHandler(file_handler)
 
     # 设置 discord.py 内部 logger 的级别
-    logging.getLogger('discord').setLevel(logging.INFO)
+    logging.getLogger('discord').setLevel(logging.WARNING)
     logging.getLogger('discord.http').setLevel(logging.WARNING)
 
     root_logger.info("日志系统初始化完成 (控制台: text, 文件: json)")

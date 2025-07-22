@@ -427,8 +427,10 @@ class FavoritesManageView(ui.View):
         next_button.callback = self.next_page_button
         self.add_item(next_button)
 
-        refresh_button = ui.Button(label="🔄 刷新", style=discord.ButtonStyle.primary)
-        refresh_button.callback = self.refresh_button
+        # The refresh button is now the primary action on this view.
+        # It will be moved here from the BatchLeaveView.
+        refresh_button = ui.Button(label="🔄 刷新数据库", style=discord.ButtonStyle.primary)
+        refresh_button.callback = self.refresh_active_threads_button
         self.add_item(refresh_button)
 
         # --- Row 1: Action Buttons ---
@@ -453,7 +455,8 @@ class FavoritesManageView(ui.View):
         
         embed = discord.Embed(
             title=f"📜 {self.user.display_name} 的收藏夹",
-            description="这里是您收藏的所有帖子。使用右键菜单中的“收藏此帖”来添加新收藏。",
+            description="管理您收藏的帖子，或对当前已加入的活跃帖子进行批量操作。\n\n"
+                        "**注意**：批量操作的数据依赖于后台扫描（约2小时一次）。如果列表不准确，请先点击“刷新数据库”。",
             color=int(os.getenv('THEME_COLOR', '0x49989a'), 16)
         )
 
@@ -485,10 +488,51 @@ class FavoritesManageView(ui.View):
             embed = await self.create_favorites_embed()
             await interaction.response.edit_message(embed=embed, view=self)
 
-    async def refresh_button(self, interaction: discord.Interaction):
-        await self.update_view_internals()
-        embed = await self.create_favorites_embed()
-        await interaction.response.edit_message(embed=embed, view=self)
+    async def refresh_active_threads_button(self, interaction: discord.Interaction):
+        """
+        This is the new central refresh logic, moved from BatchLeaveView.
+        It now includes a per-user cooldown.
+        """
+        # 1. Check for cooldown
+        bucket = self.profile_cog.refresh_cooldown.get_bucket(interaction.message)
+        retry_after = bucket.update_rate_limit()
+        if retry_after:
+            # User is on cooldown, inform them and do nothing.
+            await interaction.response.send_message(
+                f"⏳ 操作过于频繁，请在 **{int(retry_after)}** 秒后重试。",
+                ephemeral=True,
+                delete_after=5
+            )
+            return
+
+        # 2. If not on cooldown, proceed with the refresh logic
+        await interaction.response.edit_message(
+            content="🔄 正在强制刷新您在此服务器的活跃帖子列表，这可能需要一点时间...",
+            embed=None,
+            view=None
+        )
+        try:
+            scanner_service = self.profile_cog.bot.scanner_service
+            if not scanner_service:
+                raise AttributeError("Scanner service not found on bot object.")
+            
+            await scanner_service.scan_guild(interaction.guild)
+            
+            await self.update_view_internals()
+            embed = await self.create_favorites_embed()
+            embed.description = f"✅ **刷新成功！**\n\n" + (embed.description or "")
+
+            await interaction.edit_original_response(content="", embed=embed, view=self)
+
+        except Exception as e:
+            log_context = {'user_id': interaction.user.id, 'guild_id': interaction.guild.id}
+            logger.error("手动刷新数据库失败", extra=log_context, exc_info=True)
+            error_embed = discord.Embed(
+                title="❌ 刷新失败",
+                description="在刷新数据库时发生错误，请稍后再试或联系管理员。",
+                color=discord.Color.red()
+            )
+            await interaction.edit_original_response(content="", embed=error_embed, view=self)
 
     async def batch_favorite_button(self, interaction: discord.Interaction):
         await interaction.response.edit_message(content="正在加载可收藏的帖子列表...", embed=None, view=None)
@@ -501,45 +545,20 @@ class FavoritesManageView(ui.View):
         if not unfavorited_threads_data:
             embed = discord.Embed(
                 title="📥 批量收藏",
-                description="✅ 您已经收藏了所有你加入的帖子，没有需要新收藏的了！如果您想收藏没有加入的帖子,请使用右键命令",
+                description="✅ 您已经收藏了所有当前已加入的活跃帖子。\n\n"
+                            "如果这个列表不准确（例如您刚刚加入了新帖子），请返回主菜单并点击“刷新数据库”。",
                 color=int(os.getenv('THEME_COLOR', '0x49989a'), 16)
             )
-            await interaction.edit_original_response(content="", embed=embed, view=self)
+            # We need to re-add the back button for navigation
+            back_button = ui.Button(label="返回", style=discord.ButtonStyle.grey)
+            back_button.callback = self.back_to_main_menu
+            view = ui.View(timeout=60)
+            view.add_item(back_button)
+            await interaction.edit_original_response(content="", embed=embed, view=view)
             return
 
-        thread_ids_to_fetch = [t['thread_id'] for t in unfavorited_threads_data]
-        unfavorited_threads = []
-        total_to_fetch = len(thread_ids_to_fetch)
-        chunk_size = int(os.getenv('FAVORITE_FETCH_CHUNK_SIZE', '10'))
-        delay_between_chunks = float(os.getenv('FAVORITE_FETCH_DELAY_SECONDS', '1.0'))
-
-        async def fetch_thread(thread_id):
-            try:
-                return await interaction.guild.fetch_channel(thread_id)
-            except (discord.NotFound, discord.Forbidden):
-                return None
-
-        for i in range(0, total_to_fetch, chunk_size):
-            chunk = thread_ids_to_fetch[i:i + chunk_size]
-            await interaction.edit_original_response(content=f"⚙️ 正在获取帖子信息... ({i}/{total_to_fetch})", embed=None, view=None)
-            
-            tasks = [fetch_thread(tid) for tid in chunk]
-            results = await asyncio.gather(*tasks)
-            unfavorited_threads.extend([t for t in results if t is not None])
-            
-            if i + chunk_size < total_to_fetch:
-                await asyncio.sleep(delay_between_chunks)
-
-        if not unfavorited_threads:
-             embed = discord.Embed(
-                title="📥 批量收藏",
-                description="❌ 查询可收藏的帖子时出错，或已无权访问这些帖子。",
-                color=int(os.getenv('THEME_COLOR', '0x49989a'), 16)
-            )
-             await interaction.edit_original_response(content="", embed=embed, view=self)
-             return
-
-        view = BatchFavoriteConfirmView(self.profile_cog, self.favorites_service, self.user, unfavorited_threads)
+        # No need to fetch threads again, we pass the data directly
+        view = BatchFavoriteConfirmView(self.profile_cog, self.favorites_service, self.user, unfavorited_threads_data)
         embed = view.create_embed()
         await interaction.edit_original_response(content="", embed=embed, view=view)
 
@@ -609,7 +628,8 @@ class BatchFavoriteConfirmView(ui.View):
         thread_count = len(self.unfavorited_threads)
         description = (
             f"我们找到了 **{thread_count}** 个您已加入但尚未收藏的帖子。\n\n"
-            "点击“确认收藏”将把它们全部添加到你的收藏夹。"
+            "点击“确认收藏”将把它们全部添加到你的收藏夹。\n\n"
+            "*如果列表不准确，请先返回主菜单刷新。*"
         )
         
         embed = discord.Embed(
@@ -619,8 +639,9 @@ class BatchFavoriteConfirmView(ui.View):
         )
         # Display a few thread names as examples
         if self.unfavorited_threads:
-            sample_threads = "\n".join(f"- {t.name}" for t in self.unfavorited_threads[:5])
-            embed.add_field(name="最近活跃帖子:", value=sample_threads, inline=False)
+            # The data is now a list of dicts, not thread objects
+            sample_threads = "\n".join(f"- {t['thread_name']}" for t in self.unfavorited_threads[:5])
+            embed.add_field(name="帖子示例:", value=sample_threads, inline=False)
 
         return embed
 
@@ -637,8 +658,20 @@ class BatchFavoriteConfirmView(ui.View):
         processing_embed.color = int(os.getenv('THEME_COLOR', '0x49989a'), 16)
         await interaction.response.edit_message(embed=processing_embed, view=self)
 
+        # We need to fetch the thread objects before favoriting
+        thread_ids_to_fetch = [t['thread_id'] for t in self.unfavorited_threads]
+        
+        async def fetch_thread(thread_id):
+            try:
+                return await interaction.guild.fetch_channel(thread_id)
+            except (discord.NotFound, discord.Forbidden):
+                return None
+        
+        tasks = [fetch_thread(tid) for tid in thread_ids_to_fetch]
+        threads_to_favorite = [t for t in await asyncio.gather(*tasks) if t is not None]
+
         newly_favorited = await self.favorites_service.batch_favorite_threads(
-            self.user, self.unfavorited_threads
+            self.user, threads_to_favorite
         )
 
         result_view = FavoritesManageView(self.profile_cog, self.favorites_service, self.user)
@@ -857,16 +890,12 @@ class BatchLeaveView(ui.View):
     def update_components(self):
         self.clear_items()
 
-        # 统一将“刷新”和“取消”按钮放在最下面
-        refresh_button = ui.Button(label="🔄 刷新列表", style=discord.ButtonStyle.primary, row=2)
-        refresh_button.callback = self.refresh_list_button
-        self.add_item(refresh_button)
-
+        # The refresh button is gone from here.
         cancel_button = ui.Button(label="取消", style=discord.ButtonStyle.grey, row=2)
         cancel_button.callback = self.cancel_button
         self.add_item(cancel_button)
 
-        # 如果有数据，才添加选择菜单、翻页和确认按钮
+        # If there is data, add the select menu, pagination, and confirm button
         if self.all_threads_data:
             page_threads_data = self.get_current_page_threads_data()
             select_menu = BatchLeaveSelect(page_threads_data, self.selected_to_leave_ids)
@@ -880,7 +909,6 @@ class BatchLeaveView(ui.View):
             next_button.callback = self.next_page
             self.add_item(next_button)
             
-            # 将确认按钮也放在第二行，与刷新和取消对齐
             confirm_button = ui.Button(label="✅ 确认退出", style=discord.ButtonStyle.danger, row=2)
             confirm_button.callback = self.confirm_button
             self.add_item(confirm_button)
@@ -894,14 +922,15 @@ class BatchLeaveView(ui.View):
         if not self.all_threads_data:
             embed.description = (
                 "您当前没有加入任何活跃的帖子。\n\n"
-                "如果您刚刚加入了新的帖子，请点击下方的“刷新列表”按钮来更新。"
+                "如果您刚刚加入了新帖子，请返回主菜单点击“刷新数据库”来更新。"
             )
-            embed.set_footer(text="点击“取消”返回上一级菜单。")
+            embed.set_footer(text="点击“取消”返回收藏夹主菜单。")
         else:
             description = (
                 f"您当前加入了 **{len(self.all_threads_data)}** 个活跃帖子。\n\n"
                 "请从下面的菜单中，选择您希望**退出**的帖子。\n\n"
-                f"您当前已选择 **{len(self.selected_to_leave_ids)}** 个帖子准备退出。"
+                f"您当前已选择 **{len(self.selected_to_leave_ids)}** 个帖子准备退出。\n\n"
+                "*如果列表不准确，请先返回主菜单刷新。*"
             )
             embed.description = description
             embed.set_footer(text=f"第 {self.current_page + 1} / {self.total_pages} 页")
@@ -924,59 +953,7 @@ class BatchLeaveView(ui.View):
             self.current_page += 1
             await self.update_message(interaction)
 
-    async def refresh_list_button(self, interaction: discord.Interaction):
-        """
-        手动触发对当前服务器的活跃帖子扫描，并刷新视图。
-        """
-        # 1. 显示加载信息
-        await interaction.response.edit_message(
-            content="🔄 正在强制刷新活跃帖子列表，这可能需要一点时间...",
-            embed=None,
-            view=None
-        )
-
-        try:
-            # 2. 获取 scanner_service 实例并执行扫描
-            # 我们假设 scanner_service 被挂载在 bot 对象上
-            scanner_service = self.profile_cog.bot.scanner_service
-            if not scanner_service:
-                raise AttributeError("Scanner service not found on bot object.")
-            
-            await scanner_service.scan_guild(interaction.guild)
-
-            # 3. 重新获取数据
-            self.all_threads_data = await self.favorites_service.get_active_threads_for_user(self.user, interaction.guild)
-            
-            # 4. 重置视图状态
-            self.selected_to_leave_ids = set()
-            self.current_page = 0
-            self.total_pages = math.ceil(len(self.all_threads_data) / self.PAGE_SIZE) if self.all_threads_data else 1
-            
-            # 5. 更新组件和 Embed
-            self.update_components()
-            embed = self.create_embed()
-            
-            # 6. 添加一个成功提示
-            embed.description = f"✅ **刷新成功！**\n\n" + embed.description
-
-            await interaction.edit_original_response(content="", embed=embed, view=self)
-
-        except Exception as e:
-            log_context = {'user_id': interaction.user.id, 'guild_id': interaction.guild.id}
-            logger.error("手动刷新活跃帖子列表失败", extra=log_context, exc_info=True)
-            # 在出错时，尝试恢复到之前的状态或显示错误信息
-            # 为了简单起见，我们直接显示错误并引导用户返回
-            error_embed = discord.Embed(
-                title="❌ 刷新失败",
-                description="在刷新帖子列表时发生错误，请稍后再试或联系管理员。",
-                color=discord.Color.red()
-            )
-            # 重新创建一个返回按钮，让用户可以回到主菜单
-            view = ui.View(timeout=60)
-            back_button = ui.Button(label="返回主菜单", style=discord.ButtonStyle.grey)
-            back_button.callback = self.cancel_button # 复用 cancel_button 的逻辑来返回
-            view.add_item(back_button)
-            await interaction.edit_original_response(embed=error_embed, view=view)
+    # This button is now removed from this view.
 
     def disable_all_components(self):
         for item in self.children:
