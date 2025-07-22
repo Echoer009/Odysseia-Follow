@@ -38,6 +38,8 @@ class ActiveThreadScanner:
                         logger.debug(f"信号量允许：正在尝试加入帖子 '{thread.name}'...")
                         await thread.join()
                         logger.debug(f"成功加入帖子 '{thread.name}' (ID: {thread.id})。")
+                        # 在成功加入后，强制等待2秒，以进一步降低请求速率，避免速率限制
+                        await asyncio.sleep(2)
                 except discord.Forbidden:
                     # 这是预期的行为，当机器人尝试加入一个它无权访问的私有帖子时会发生。
                     logger.debug(f"无法加入帖子 '{thread.name}' (ID: {thread.id})，这可能是一个私有帖子。跳过。")
