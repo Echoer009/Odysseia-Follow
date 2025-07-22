@@ -18,9 +18,9 @@ class ActiveThreadScanner:
             self.concurrent_tasks = 25
             self.chunk_delay = 0.5
         # 创建一个信号量，用于限制并发的“加入帖子”请求数量，防止速率限制。
-        # 这就像一个只允许5个请求同时通过的门，可以有效避免请求风暴。
-        self.join_semaphore = asyncio.Semaphore(5)
-        logger.info(f"扫描服务已配置：并发数={self.concurrent_tasks}, 批次延迟={self.chunk_delay}s, 加入并发数=5")
+        # 这就像一个只允许1个请求同时通过的门，可以有效避免请求风暴。
+        self.join_semaphore = asyncio.Semaphore(1)
+        logger.info(f"扫描服务已配置：并发数={self.concurrent_tasks}, 批次延迟={self.chunk_delay}s, 加入并发数=1")
 
     async def _process_thread(self, thread: discord.Thread, guild_id: int):
         """处理单个帖子的逻辑。"""
@@ -38,6 +38,10 @@ class ActiveThreadScanner:
                         logger.debug(f"信号量允许：正在尝试加入帖子 '{thread.name}'...")
                         await thread.join()
                         logger.debug(f"成功加入帖子 '{thread.name}' (ID: {thread.id})。")
+                except discord.Forbidden:
+                    # 这是预期的行为，当机器人尝试加入一个它无权访问的私有帖子时会发生。
+                    logger.debug(f"无法加入帖子 '{thread.name}' (ID: {thread.id})，这可能是一个私有帖子。跳过。")
+                    return thread, None, None # 返回成功状态，因为这是正常逻辑
                 except discord.HTTPException as join_e:
                     logger.warning(f"尝试加入帖子 '{thread.name}' (ID: {thread.id}) 失败: {join_e}。跳过此帖。")
                     return thread, None, join_e
