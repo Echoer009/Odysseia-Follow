@@ -22,20 +22,28 @@ class ActiveThreadScanner:
     async def _process_thread(self, thread: discord.Thread, guild_id: int):
         """处理单个帖子的逻辑。"""
         try:
+            # 检查机器人是否是成员，如果不是，则主动加入
+            if thread.me is None:
+                # 检查帖子是否已归档或锁定，这种情况下可能无法加入
+                if thread.archived or thread.locked:
+                    logger.debug(f"帖子 '{thread.name}' (ID: {thread.id}) 已归档或锁定，无法加入，跳过。")
+                    return thread, 0, None
+                
+                try:
+                    logger.debug(f"机器人不是帖子 '{thread.name}' 的成员，正在尝试主动加入...")
+                    await thread.join()
+                    logger.debug(f"成功加入帖子 '{thread.name}' (ID: {thread.id})。")
+                except discord.HTTPException as join_e:
+                    logger.warning(f"尝试加入帖子 '{thread.name}' (ID: {thread.id}) 失败: {join_e}。跳过此帖。")
+                    return thread, None, join_e
+
+            # 现在机器人肯定是成员了，可以获取成员列表
             members = await thread.fetch_members()
             member_ids = [member.id for member in members]
             await self.db.update_active_thread_members(thread.id, thread.name, member_ids, guild_id)
             return thread, len(member_ids), None
         except discord.HTTPException as e:
-            is_private = thread.type == discord.ChannelType.private_thread
-            bot_is_member = thread.me is not None
-            logger.warning(
-                f"获取帖子 '{thread.name}' (ID: {thread.id}) 的成员失败: {e}。跳过此帖。\n"
-                f"  - 帖子类型: {'私有 (Private)' if is_private else '公开 (Public)'}\n"
-                f"  - 机器人是否为成员: {bot_is_member}\n"
-                f"  - 是否已归档: {thread.archived}\n"
-                f"  - 是否已锁定: {thread.locked}"
-            )
+            logger.warning(f"获取帖子 '{thread.name}' (ID: {thread.id}) 的成员时发生HTTP异常: {e}。跳过此帖。")
             return thread, None, e
         except Exception as e:
             logger.error(f"处理帖子 '{thread.name}' 时发生未知错误: {e}", exc_info=True)
@@ -80,7 +88,7 @@ class ActiveThreadScanner:
                         # 错误已在 _process_thread 中记录，这里可以只计数
                         pass
                     else:
-                        logger.info(f"({processed_count}/{total_threads}) 已处理 '{thread.name}'，找到 {member_count} 个成员。")
+                        logger.debug(f"({processed_count}/{total_threads}) 已处理 '{thread.name}'，找到 {member_count} 个成员。")
             
             if i + self.concurrent_tasks < total_threads:
                 logger.debug(f"完成一个批次的处理，等待{self.chunk_delay}秒后继续...")
