@@ -17,7 +17,10 @@ class ActiveThreadScanner:
         except (ValueError, TypeError):
             self.concurrent_tasks = 25
             self.chunk_delay = 0.5
-        logger.info(f"扫描服务已配置：并发数={self.concurrent_tasks}, 批次延迟={self.chunk_delay}s")
+        # 创建一个信号量，用于限制并发的“加入帖子”请求数量，防止速率限制。
+        # 这就像一个只允许5个请求同时通过的门，可以有效避免请求风暴。
+        self.join_semaphore = asyncio.Semaphore(5)
+        logger.info(f"扫描服务已配置：并发数={self.concurrent_tasks}, 批次延迟={self.chunk_delay}s, 加入并发数=5")
 
     async def _process_thread(self, thread: discord.Thread, guild_id: int):
         """处理单个帖子的逻辑。"""
@@ -30,9 +33,11 @@ class ActiveThreadScanner:
                     return thread, 0, None
                 
                 try:
-                    logger.debug(f"机器人不是帖子 '{thread.name}' 的成员，正在尝试主动加入...")
-                    await thread.join()
-                    logger.debug(f"成功加入帖子 '{thread.name}' (ID: {thread.id})。")
+                    # 使用信号量来限制并发的 join 请求，防止速率限制
+                    async with self.join_semaphore:
+                        logger.debug(f"信号量允许：正在尝试加入帖子 '{thread.name}'...")
+                        await thread.join()
+                        logger.debug(f"成功加入帖子 '{thread.name}' (ID: {thread.id})。")
                 except discord.HTTPException as join_e:
                     logger.warning(f"尝试加入帖子 '{thread.name}' (ID: {thread.id}) 失败: {join_e}。跳过此帖。")
                     return thread, None, join_e
