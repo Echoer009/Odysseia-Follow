@@ -27,7 +27,15 @@ class ActiveThreadScanner:
             await self.db.update_active_thread_members(thread.id, thread.name, member_ids, guild_id)
             return thread, len(member_ids), None
         except discord.HTTPException as e:
-            logger.warning(f"获取帖子 '{thread.name}' 的成员失败: {e}。跳过此帖。")
+            is_private = thread.type == discord.ChannelType.private_thread
+            bot_is_member = thread.me is not None
+            logger.warning(
+                f"获取帖子 '{thread.name}' (ID: {thread.id}) 的成员失败: {e}。跳过此帖。\n"
+                f"  - 帖子类型: {'私有 (Private)' if is_private else '公开 (Public)'}\n"
+                f"  - 机器人是否为成员: {bot_is_member}\n"
+                f"  - 是否已归档: {thread.archived}\n"
+                f"  - 是否已锁定: {thread.locked}"
+            )
             return thread, None, e
         except Exception as e:
             logger.error(f"处理帖子 '{thread.name}' 时发生未知错误: {e}", exc_info=True)
