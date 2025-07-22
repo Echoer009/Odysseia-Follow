@@ -11,6 +11,8 @@ class ActiveThreadScanner:
         self.bot = bot
         self.db = db
         self.task: asyncio.Task = None
+        # 为服务器扫描操作添加一个全局锁，防止手动刷新和后台任务并发执行
+        self.scan_lock = asyncio.Lock()
         try:
             self.concurrent_tasks = int(os.getenv('SCANNER_CONCURRENT_TASKS', '25'))
             self.chunk_delay = float(os.getenv('SCANNER_CHUNK_DELAY_SECONDS', '0.5'))
@@ -23,112 +25,128 @@ class ActiveThreadScanner:
         logger.info(f"扫描服务已配置：并发数={self.concurrent_tasks}, 批次延迟={self.chunk_delay}s, 加入并发数=1")
 
     async def _process_thread(self, thread: discord.Thread, guild_id: int):
-        """处理单个帖子的逻辑。"""
-        try:
-            # 检查机器人是否是成员，如果不是，则主动加入
-            if thread.me is None:
-                # 检查帖子是否已归档或锁定，这种情况下可能无法加入
-                if thread.archived or thread.locked:
-                    logger.debug(f"帖子 '{thread.name}' (ID: {thread.id}) 已归档或锁定，无法加入，跳过。")
-                    return thread, 0, None
-                
-                try:
-                    # 使用信号量来限制并发的 join 请求，防止速率限制
-                    async with self.join_semaphore:
-                        logger.debug(f"信号量允许：正在尝试加入帖子 '{thread.name}'...")
-                        await thread.join()
-                        logger.debug(f"成功加入帖子 '{thread.name}' (ID: {thread.id})。")
-                        # 在成功加入后，强制等待2秒，以进一步降低请求速率，避免速率限制
-                        await asyncio.sleep(2)
-                except discord.Forbidden:
-                    # 这是预期的行为，当机器人尝试加入一个它无权访问的私有帖子时会发生。
-                    logger.debug(f"无法加入帖子 '{thread.name}' (ID: {thread.id})，这可能是一个私有帖子。跳过。")
-                    return thread, None, None # 返回成功状态，因为这是正常逻辑
-                except discord.HTTPException as join_e:
-                    logger.warning(f"尝试加入帖子 '{thread.name}' (ID: {thread.id}) 失败: {join_e}。跳过此帖。")
-                    return thread, None, join_e
+        """
+        处理单个帖子的逻辑。
+        如果缓存显示机器人不是成员，则会二次核查。
+        """
+        # 1. 检查缓存中的成员状态，如果显示未加入，则进行二次核查
+        if thread.me is None:
+            try:
+                logger.debug(f"缓存显示未加入帖子 '{thread.name}' (ID: {thread.id})，正在二次核查...")
+                # 使用 fetch_channel 获取最新的帖子对象，覆盖掉可能过时的缓存对象
+                thread = await self.bot.fetch_channel(thread.id)
+                if not isinstance(thread, discord.Thread):
+                    logger.warning(f"对象 (ID: {thread.id}) 在二次核查时发现不是帖子。")
+                    return thread, 0, None  # 无法处理
+            except (discord.NotFound, discord.Forbidden):
+                logger.warning(f"二次核查帖子 (ID: {thread.id}) 时失败（可能已删除或无权限），跳过。")
+                return thread, 0, None  # 无法处理
+            except Exception as e:
+                logger.error(f"二次核查帖子 (ID: {thread.id}) 时发生未知错误: {e}", exc_info=True)
+                return thread, 0, None  # 无法处理
 
-            # 现在机器人肯定是成员了，可以获取成员列表
-            members = await thread.fetch_members()
-            member_ids = [member.id for member in members]
-            await self.db.update_active_thread_members(thread.id, thread.name, member_ids, guild_id)
-            return thread, len(member_ids), None
-        except discord.HTTPException as e:
-            logger.warning(f"获取帖子 '{thread.name}' (ID: {thread.id}) 的成员时发生HTTP异常: {e}。跳过此帖。")
-            return thread, None, e
-        except Exception as e:
-            logger.error(f"处理帖子 '{thread.name}' 时发生未知错误: {e}", exc_info=True)
-            return thread, None, e
+        # 2. 经过二次核查（如果需要），现在我们有了更新的帖子对象，再次检查成员状态
+        if thread.me is None:
+            # 确认未加入
+            if not thread.archived and not thread.locked:
+                await self.db.add_thread_to_join_queue(thread.id, guild_id)
+                logger.debug(f"确认未加入帖子 '{thread.name}' (ID: {thread.id})，已添加到待办队列。")
+            return thread, 0, None  # 扫描器的任务完成
+        else:
+            # 确认已加入 (无论是最初缓存正确，还是二次核查后发现)
+            try:
+                members = await thread.fetch_members()
+                member_ids = [member.id for member in members]
+                await self.db.update_active_thread_members(thread.id, thread.name, member_ids, guild_id)
+                logger.debug(f"已处理成员帖子 '{thread.name}'，找到 {len(member_ids)} 个成员。")
+                return thread, len(member_ids), None
+            except discord.HTTPException as e:
+                logger.warning(f"获取帖子 '{thread.name}' 的成员失败: {e}。跳过此帖。")
+                return thread, None, e
+            except Exception as e:
+                logger.error(f"处理帖子 '{thread.name}' 时发生未知错误: {e}", exc_info=True)
+                return thread, None, e
 
     async def scan_guild(self, guild: discord.Guild):
-        """对单个服务器执行并发扫描和数据更新。"""
-        logger.info(f"开始扫描服务器 '{guild.name}' (ID: {guild.id}) 的活跃帖子...")
-        
-        try:
-            active_threads = await asyncio.wait_for(guild.active_threads(), timeout=60.0)
-        except asyncio.TimeoutError:
-            logger.error(f"获取服务器 '{guild.name}' 的活跃帖子列表超时（超过60秒）。")
-            return
-        except Exception as e:
-            logger.critical(f"获取服务器 '{guild.name}' 的活跃帖子时发生未知严重错误: {e}", exc_info=True)
-            return
-
-        if not active_threads:
-            logger.info(f"服务器 '{guild.name}' 中没有找到活跃帖子。")
-            return
-
-        total_threads = len(active_threads)
-        logger.info(f"在 '{guild.name}' 中找到 {total_threads} 个活跃帖子，开始并发处理...")
-        
-        await self.db.clear_active_thread_members(guild.id)
-        
-        processed_count = 0
-        for i in range(0, total_threads, self.concurrent_tasks):
-            chunk = active_threads[i:i + self.concurrent_tasks]
-            tasks = [self._process_thread(thread, guild.id) for thread in chunk]
+        """对单个服务器执行并发扫描和数据更新。此方法现在是线程安全的。"""
+        async with self.scan_lock:
+            logger.info(f"开始扫描服务器 '{guild.name}' (ID: {guild.id}) 的活跃帖子...")
             
-            results = await asyncio.gather(*tasks, return_exceptions=True)
+            try:
+                active_threads = await asyncio.wait_for(guild.active_threads(), timeout=60.0)
+            except asyncio.TimeoutError:
+                logger.error(f"获取服务器 '{guild.name}' 的活跃帖子列表超时（超过60秒）。")
+                return
+            except Exception as e:
+                logger.critical(f"获取服务器 '{guild.name}' 的活跃帖子时发生未知严重错误: {e}", exc_info=True)
+                return
+
+            if not active_threads:
+                logger.info(f"服务器 '{guild.name}' 中没有找到活跃帖子。")
+                return
+
+            total_threads = len(active_threads)
+            logger.info(f"在 '{guild.name}' 中找到 {total_threads} 个活跃帖子，开始并发处理...")
             
-            for res in results:
-                processed_count += 1
-                if isinstance(res, Exception):
-                    logger.error(f"处理一个帖子时 gather 捕获到未处理的异常: {res}")
-                else:
-                    thread, member_count, error = res
-                    if error:
-                        # 错误已在 _process_thread 中记录，这里可以只计数
-                        pass
+            await self.db.clear_active_thread_members(guild.id)
+            
+            processed_count = 0
+            for i in range(0, total_threads, self.concurrent_tasks):
+                chunk = active_threads[i:i + self.concurrent_tasks]
+                tasks = [self._process_thread(thread, guild.id) for thread in chunk]
+                
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                
+                for res in results:
+                    processed_count += 1
+                    if isinstance(res, Exception):
+                        logger.error(f"处理一个帖子时 gather 捕获到未处理的异常: {res}")
                     else:
-                        logger.debug(f"({processed_count}/{total_threads}) 已处理 '{thread.name}'，找到 {member_count} 个成员。")
-            
-            if i + self.concurrent_tasks < total_threads:
-                logger.debug(f"完成一个批次的处理，等待{self.chunk_delay}秒后继续...")
-                await asyncio.sleep(self.chunk_delay)
+                        thread, member_count, error = res
+                        if error:
+                            # 错误已在 _process_thread 中记录，这里可以只计数
+                            pass
+                        else:
+                            logger.debug(f"({processed_count}/{total_threads}) 已处理 '{thread.name}'，找到 {member_count} 个成员。")
+                
+                if i + self.concurrent_tasks < total_threads:
+                    logger.debug(f"完成一个批次的处理，等待{self.chunk_delay}秒后继续...")
+                    await asyncio.sleep(self.chunk_delay)
 
-        logger.info(f"服务器 '{guild.name}' 的活跃帖子扫描完成。")
+            logger.info(f"服务器 '{guild.name}' 的活跃帖子扫描完成。")
 
     async def start_scanning_loop(self, interval_seconds: int):
-        """启动后台循环任务。"""
+        """启动后台循环任务。该任务会先等待一个周期，然后再执行扫描。"""
         await self.bot.wait_until_ready()
-        logger.info(f"后台扫描任务已启动，将立即开始首次扫描，扫描间隔为 {interval_seconds / 3600:.1f} 小时。")
+        logger.info(f"后台扫描任务已启动，将在 {interval_seconds / 3600:.1f} 小时后进行首次周期性扫描。")
         
         while not self.bot.is_closed():
-            # 1. 执行扫描
-            logger.info("开始新一轮的活跃帖子扫描...")
-            for guild in self.bot.guilds:
-                # 增加一个检查，以防在扫描过程中机器人关闭
-                if self.bot.is_closed():
-                    logger.info("机器人在扫描服务器期间关闭，任务终止。")
-                    return
-                await self.scan_guild(guild)
-            
-            # 2. 等待下一次扫描
-            logger.info(f"所有服务器扫描完毕，将在 {interval_seconds / 3600:.1f} 小时后再次扫描。")
             try:
+                # 1. 首先等待一个完整的周期
                 await asyncio.sleep(interval_seconds)
+
+                # 2. 等待结束后，执行扫描
+                logger.info("开始新一轮的周期性活跃帖子扫描...")
+                for guild in self.bot.guilds:
+                    # 增加一个检查，以防在扫描过程中机器人关闭
+                    if self.bot.is_closed():
+                        logger.info("机器人在扫描服务器期间关闭，任务终止。")
+                        return
+                    await self.scan_guild(guild)
+                logger.info(f"周期性扫描完成，将在 {interval_seconds / 3600:.1f} 小时后再次扫描。")
+
             except asyncio.CancelledError:
                 logger.info("扫描任务被取消，循环终止。")
                 break
+            except Exception as e:
+                logger.error(f"后台扫描循环中发生未知错误: {e}", exc_info=True)
+                # 发生未知错误后，为避免快速失败循环，同样等待一个周期
+                logger.info("为防止错误快速循环，将等待一个周期后重试...")
+                try:
+                    await asyncio.sleep(interval_seconds)
+                except asyncio.CancelledError:
+                    logger.info("在错误恢复等待期间，扫描任务被取消，循环终止。")
+                    break
 
     def start(self, interval_seconds: int):
         """公开的启动方法。"""

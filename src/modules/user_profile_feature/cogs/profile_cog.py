@@ -2,7 +2,9 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 import logging
+import os
 from typing import TYPE_CHECKING
+from datetime import timedelta
 
 # --- Service Imports ---
 from src.modules.author_follow.services.author_follow_service import AuthorFollowService
@@ -21,6 +23,9 @@ class UserProfileCog(commands.Cog):
         self.bot = bot
         self.author_follow_service: AuthorFollowService = bot.author_follow_service
         self.profile_service: ProfileService = bot.profile_service
+        # Cooldown for the refresh button, configurable via .env
+        cooldown_seconds = int(os.getenv('REFRESH_COOLDOWN_SECONDS', '1800')) # Default to 30 minutes
+        self.refresh_cooldown = commands.CooldownMapping.from_cooldown(1, cooldown_seconds, commands.BucketType.user)
 
     @app_commands.command(name="我的关注", description="在面板中管理您关注的作者,频道和收藏夹")
     async def my_follows(self, interaction: discord.Interaction):

@@ -10,6 +10,7 @@ from src.modules.user_profile_feature.services.profile_service import ProfileSer
 from src.modules.channel_subscription.services.subscription_service import SubscriptionService
 from src.modules.thread_favorites.services.favorites_service import FavoritesService
 from src.modules.thread_favorites.services.scanner_service import ActiveThreadScanner
+from src.modules.thread_favorites.services.joiner_service import ThreadJoiner
 import logging
 from src.core.logging_setup import setup_logging
 
@@ -22,6 +23,7 @@ logger = logging.getLogger(__name__)
 
 class MyBot(commands.Bot):
     def __init__(self):
+        logger.info("--- ⌛ 0. 环境与配置加载 ---")
         # 从 .env 文件加载 GUILD_ID
         GUILD_ID = os.getenv("GUILD_ID")
 
@@ -34,14 +36,14 @@ class MyBot(commands.Bot):
             self.guild_ids = []
             logger.info("未在 .env 文件中指定 GUILD_ID，将进行全局同步。")
 
+        # --- 在这里加载和处理全局配置 ---
+        self.resource_channel_ids: set[int] = self._load_resource_channels()
+
         # 确保 intents 正确设置
         intents = discord.Intents.default()
         intents.message_content = True
         intents.members = True  # 确保开启了成员意图，以便获取用户信息
         super().__init__(command_prefix="!", intents=intents)
-        
-        # --- 在这里加载和处理全局配置 ---
-        self.resource_channel_ids: set[int] = self._load_resource_channels()
         
         # 2. 更新服务属性的名称和类型提示
         self.db: Database | None = None
@@ -51,6 +53,7 @@ class MyBot(commands.Bot):
         self.favorites_service: FavoritesService | None = None
         self.db_backup_task: asyncio.Task | None = None
         self.scanner_service: ActiveThreadScanner | None = None
+        self.thread_joiner_service: ThreadJoiner | None = None
 
     def _load_resource_channels(self) -> set[int]:
         """从环境变量加载并解析需要监听的频道ID"""
@@ -71,9 +74,9 @@ class MyBot(commands.Bot):
     async def setup_hook(self) -> None:
         """
         Bot 启动时执行的异步初始化。
-        加载 cogs 并同步命令树。
+        这里只做最核心、最快的初始化。
         """
-        # --- 1. 初始化数据库和所有服务 ---
+        logger.info("--- 🚀 1. 初始化核心服务 ---")
         self.db = Database()
         await self.db.connect()
         
@@ -82,55 +85,65 @@ class MyBot(commands.Bot):
         self.subscription_service = SubscriptionService(self.db)
         self.favorites_service = FavoritesService(self.db)
         self.scanner_service = ActiveThreadScanner(self, self.db)
-        logger.info("数据库和服务已成功初始化。")
+        self.thread_joiner_service = ThreadJoiner(self, self.db)
+        logger.info("✅ 核心服务初始化完成。")
 
-        # --- 2. 启动后台任务 ---
-        await self.start_db_backup_task()
-        await self.start_scanner_service_task()
-
-        # --- 3. 加载所有模块/Cogs ---
+        logger.info("--- 🧩 2. 加载功能模块 (Cogs) ---")
         await self.load_all_cogs()
 
-        # --- 4. 同步应用命令 ---
-        logger.info("--- 正在同步应用命令 ---")
+        logger.info("--- 🛰️ 3. 同步应用命令 ---")
         if self.guild_ids:
             for guild_id in self.guild_ids:
                 guild = discord.Object(id=guild_id)
                 self.tree.copy_global_to(guild=guild)
                 await self.tree.sync(guild=guild)
-                logger.info(f"命令树已同步到服务器: {guild_id}")
+                logger.info(f"✅ 命令已同步到服务器: {guild_id}")
         else:
-            # 否则进行全局同步，这可能需要长达一小时才能生效
             await self.tree.sync()
-            logger.info("命令树已全局同步。")
-
-        # --- 5. 列出已加载的命令 ---
+            logger.info("✅ 命令已全局同步。")
+        
         self.list_loaded_commands()
+        logger.info(f"--- 🎉 机器人核心已就绪,等待 Discord 连接成功...---")
 
-        logger.info(f"以 {self.user} (ID: {self.user.id}) 的身份登录")
-        logger.info('------------------------')
+    async def on_ready(self):
+        """当机器人成功连接到 Discord 后执行所有耗时和后台任务。"""
+        logger.info(f"--- ✅ 已成功连接到 Discord ---,以 {self.user} (ID: {self.user.id}) 的身份登录-")
 
-    async def start_db_backup_task(self):
-        """从环境变量读取配置并启动数据库备份的后台任务。"""
+        # --- 4. 执行首次扫描并填充队列 ---
+        logger.info("--- 🏃 4. 执行首次帖子扫描 (这可能需要一点时间) ---")
+        for guild in self.guilds:
+            await self.scanner_service.scan_guild(guild)
+        logger.info("✅ 首次帖子扫描完成，待办队列已填充。")
+
+        # --- 5. 启动所有后台任务 ---
+        logger.info("--- 🚀 5. 启动所有后台服务 ---")
+        self.start_background_tasks()
+        logger.info("✅ 所有后台服务已成功启动。")
+        logger.info("======================== 机器人完全就绪 ========================")
+
+    def start_background_tasks(self):
+        """统一启动所有后台任务。"""
+        # 数据库备份
         backup_interval_hours_str = os.getenv('BACKUP_INTERVAL_HOURS')
         if backup_interval_hours_str and backup_interval_hours_str.isdigit() and int(backup_interval_hours_str) > 0:
             interval_hours = int(backup_interval_hours_str)
-            interval_seconds = interval_hours * 3600
-            self.db_backup_task = self.loop.create_task(self.db.start_backup_loop(interval_seconds))
-            logger.info(f"已启动数据库自动备份任务，间隔为 {interval_hours} 小时。")
+            self.db_backup_task = self.loop.create_task(self.db.start_backup_loop(interval_hours * 3600))
+            logger.info("  - [启动] 数据库自动备份任务。")
         else:
-            logger.warning("数据库自动备份已禁用（未配置或间隔为0）。")
+            logger.warning("  - [跳过] 数据库自动备份已禁用。")
 
-    async def start_scanner_service_task(self):
-        """从环境变量读取配置并启动活跃帖子扫描的后台任务。"""
+        # 帖子扫描器 (周期性)
         scanner_interval_hours_str = os.getenv('SCANNER_INTERVAL_HOURS')
         if scanner_interval_hours_str and scanner_interval_hours_str.isdigit() and int(scanner_interval_hours_str) > 0:
             interval_hours = int(scanner_interval_hours_str)
-            interval_seconds = interval_hours * 3600
-            self.scanner_service.start(interval_seconds)
-            logger.info(f"已启动活跃帖子扫描任务，间隔为 {interval_hours} 小时。")
+            self.scanner_service.start(interval_hours * 3600)
+            logger.info("  - [启动] 活跃帖子扫描服务。")
         else:
-            logger.warning("活跃帖子扫描任务已禁用（未配置或间隔为0）。")
+            logger.warning("  - [跳过] 活跃帖子扫描服务已禁用。")
+
+        # 帖子加入器
+        self.thread_joiner_service.start()
+        logger.info("  - [启动] 帖子自动加入服务。")
 
     async def close(self):
         """在机器人关闭时，优雅地清理资源。"""
@@ -151,6 +164,10 @@ class MyBot(commands.Bot):
         if self.scanner_service and self.scanner_service.task and not self.scanner_service.task.done():
             self.scanner_service.stop()
             logger.info("活跃帖子扫描任务已停止。")
+        
+        if self.thread_joiner_service and self.thread_joiner_service.task and not self.thread_joiner_service.task.done():
+            self.thread_joiner_service.stop()
+            logger.info("帖子自动加入任务已停止。")
 
         # 关闭数据库连接
         if self.db and self.db.conn:
@@ -165,7 +182,6 @@ class MyBot(commands.Bot):
         project_root = pathlib.Path(__file__).parent.parent
         modules_root = project_root / "src" / "modules"
         
-        logger.info("--- 正在加载 模块 ---")
         # 递归查找 'modules' 目录下所有 'cogs' 子文件夹中的 .py 文件
         for path in modules_root.rglob("cogs/*.py"):
             if path.name == "__init__.py" or path.name == "views.py":
@@ -179,11 +195,10 @@ class MyBot(commands.Bot):
                 logger.info(f"✅ 已加载: {module_path}")
             except Exception as e:
                 logger.error(f"❌ 加载 {module_path} 失败: {e}", exc_info=True)
-        logger.info("--- 模块 加载完毕 ---")
 
     def list_loaded_commands(self):
         """用于打印出所有已注册的应用命令。"""
-        logger.info("--- 已加载的应用命令 ---")
+        logger.info("--- 📋 已加载的应用命令 ---")
         # 从命令树中获取所有已注册的命令
         commands = self.tree.get_commands()
         if not commands:
@@ -191,7 +206,6 @@ class MyBot(commands.Bot):
         else:
             for command in commands:
                 logger.info(f"  - /{command.name}")
-        logger.info("------------------------")
 
 
 async def main():

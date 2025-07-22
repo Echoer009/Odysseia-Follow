@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 class FavoritesService:
     def __init__(self, db: Database):
         self.db = db
+        # 为批量离开操作添加一个锁，以防止并发调用导致速率限制
+        self.leave_lock = asyncio.Lock()
 
     async def get_user_favorites(self, user_id: int, page: int, page_size: int) -> list[dict]:
         """获取用户收藏夹的分页列表。"""
@@ -75,35 +77,28 @@ class FavoritesService:
 
     async def batch_leave_threads(self, user: discord.User, threads_to_leave: List[discord.Thread]) -> Tuple[int, int]:
         """
-        批量将用户从指定的帖子中移出，并加入了分块和延时以避免速率限制。
+        批量将用户从指定的帖子中移出。此方法使用最终的、最安全的串行处理模式，以100%避免速率限制。
         返回一个元组 (succeeded_count, failed_count)。
         """
-        if not threads_to_leave:
-            return 0, 0
+        async with self.leave_lock:
+            if not threads_to_leave:
+                return 0, 0
 
-        succeeded_count = 0
-        failed_count = 0
-        CHUNK_SIZE = int(os.getenv('LEAVE_CHUNK_SIZE', '5'))
-        DELAY_BETWEEN_CHUNKS = float(os.getenv('LEAVE_DELAY_SECONDS', '2.0'))
+            succeeded_count = 0
+            failed_count = 0
+            # 从环境变量获取每个请求之间的延迟，默认为1秒，这是一个非常安全的值
+            delay_per_request = float(os.getenv('LEAVE_DELAY_SECONDS', '1.0'))
 
-        async def leave_thread(thread):
-            try:
-                await thread.remove_user(user)
-                # 方案一：成功退出后，立即从缓存中删除
-                await self.db.remove_active_thread_member(user.id, thread.id)
-                return True
-            except discord.HTTPException:
-                return False
-
-        for i in range(0, len(threads_to_leave), CHUNK_SIZE):
-            chunk = threads_to_leave[i:i + CHUNK_SIZE]
-            tasks = [leave_thread(t) for t in chunk]
-            results = await asyncio.gather(*tasks)
+            for thread in threads_to_leave:
+                try:
+                    await thread.remove_user(user)
+                    # 成功退出后，立即从缓存中删除
+                    await self.db.remove_active_thread_member(user.id, thread.id)
+                    succeeded_count += 1
+                except discord.HTTPException:
+                    failed_count += 1
+                
+                # 在每次API调用后都进行短暂的暂停，以避免速率限制
+                await asyncio.sleep(delay_per_request)
             
-            succeeded_count += results.count(True)
-            failed_count += results.count(False)
-            
-            if i + CHUNK_SIZE < len(threads_to_leave):
-                await asyncio.sleep(DELAY_BETWEEN_CHUNKS)
-        
-        return succeeded_count, failed_count
+            return succeeded_count, failed_count
