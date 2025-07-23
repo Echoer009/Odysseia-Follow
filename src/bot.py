@@ -110,7 +110,7 @@ class MyBot(commands.Bot):
         logger.info("--- 🏃 4. 执行首次帖子扫描 (这可能需要一点时间) ---")
         for guild in self.guilds:
             await self.scanner_service.scan_guild(guild)
-        logger.info("✅ 首次帖子扫描完成，待办队列已填充。")
+        logger.info("✅ 首次帖子扫描完成。")
 
         # --- 5. 启动所有后台任务 ---
         logger.info("--- 🚀 5. 启动所有后台服务 ---")
