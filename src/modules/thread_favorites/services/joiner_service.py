@@ -28,7 +28,7 @@ class ThreadJoiner:
 
                 if queue_item:
                     thread_id, guild_id = queue_item
-                    logger.info(f"开始处理待加入的帖子，ID: {thread_id}")
+                    logger.debug(f"开始处理待加入的帖子，ID: {thread_id}")
 
                     status = "processed" # 默认为已处理
                     try:
@@ -39,20 +39,24 @@ class ThreadJoiner:
                             logger.warning(f"对象 (ID: {thread_id}) 不是一个帖子，无法加入。将标记为失败。")
                             status = "failed"
                         elif thread.me:
-                            logger.info(f"机器人已经是帖子 '{thread.name}' (ID: {thread_id}) 的成员，无需加入。标记为已处理。")
+                            logger.debug(f"机器人已经是帖子 '{thread.name}' (ID: {thread_id}) 的成员，无需加入。标记为已处理。")
                             status = "processed"
                         else:
                             await thread.join()
-                            logger.info(f"成功加入帖子 '{thread.name}' (ID: {thread_id})。")
+                            logger.debug(f"成功加入帖子 '{thread.name}' (ID: {thread_id})。")
                             
                             # 成功加入后，立即获取成员并更新 active_thread_members 表
                             try:
                                 members = await thread.fetch_members()
                                 member_ids = [member.id for member in members]
                                 await self.db.update_active_thread_members(thread.id, thread.name, member_ids, guild_id)
-                                logger.info(f"已为新加入的帖子 '{thread.name}' 更新了 {len(member_ids)} 名成员。")
+                                logger.debug(f"已为新加入的帖子 '{thread.name}' 更新了 {len(member_ids)} 名成员。")
                             except Exception as e:
-                                logger.error(f"为新加入的帖子 '{thread.name}' 更新成员时出错: {e}", exc_info=True)
+                                logger.error(
+                                    f"为新加入的帖子 '{thread.name}' (ID: {thread.id}, Guild: {guild_id}) 更新成员列表时失败。 "
+                                    f"机器人已成功加入该帖，但无法获取其成员。错误: {e}",
+                                    exc_info=True
+                                )
                             
                             status = "processed"
                             
@@ -68,7 +72,7 @@ class ThreadJoiner:
                     finally:
                         # 3. 无论成功与否，都更新任务的状态
                         await self.db.update_join_queue_status(thread_id, status)
-                        logger.info(f"已更新任务 (ID: {thread_id}) 状态为 '{status}'。")
+                        logger.debug(f"已更新任务 (ID: {thread_id}) 状态为 '{status}'。")
                 
                 # 4. 等待下一个周期
                 await asyncio.sleep(self.interval)

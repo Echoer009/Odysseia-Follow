@@ -39,7 +39,23 @@ class ActiveThreadScanner:
                     logger.warning(f"对象 (ID: {thread.id}) 在二次核查时发现不是帖子。")
                     return thread, 0, None  # 无法处理
             except (discord.NotFound, discord.Forbidden):
-                logger.warning(f"二次核查帖子 (ID: {thread.id}) 时失败（可能已删除或无权限），跳过。")
+                # 尝试获取帖子类型以提供更丰富的日志
+                privacy_status = "未知"
+                if thread.type == discord.ChannelType.private_thread:
+                    privacy_status = "私密帖子"
+                elif thread.type == discord.ChannelType.public_thread:
+                    privacy_status = "公开帖子"
+                elif thread.type == discord.ChannelType.news_thread:
+                    privacy_status = "新闻帖子"
+
+                logger.warning(
+                    f"\n--- 二次核查失败事件 ---\n"
+                    f"  帖子: '{thread.name}' (ID: {thread.id})\n"
+                    f"  状态: 无法访问 (可能已被删除或无权限)。\n"
+                    f"  推测类型: {privacy_status}\n"
+                    f"  操作: 已跳过，不会加入队列。\n"
+                    f"--------------------------"
+                )
                 return thread, 0, None  # 无法处理
             except Exception as e:
                 logger.error(f"二次核查帖子 (ID: {thread.id}) 时发生未知错误: {e}", exc_info=True)
