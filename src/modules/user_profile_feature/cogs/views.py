@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING, List
 
 from src.modules.thread_favorites.services.favorites_service import FavoritesService
 
+from src.core.utils import retry_on_discord_error
+
 if TYPE_CHECKING:
     from .profile_cog import UserProfileCog
     from src.modules.channel_subscription.cogs.subscription_tracker import SubscriptionTracker
@@ -663,8 +665,11 @@ class BatchFavoriteConfirmView(ui.View):
         
         async def fetch_thread(thread_id):
             try:
-                return await interaction.guild.fetch_channel(thread_id)
-            except (discord.NotFound, discord.Forbidden):
+                return await retry_on_discord_error(
+                    lambda: interaction.guild.fetch_channel(thread_id),
+                    f"批量收藏 - 获取帖子 {thread_id}"
+                )
+            except (discord.NotFound, discord.Forbidden, discord.errors.DiscordServerError):
                 return None
         
         tasks = [fetch_thread(tid) for tid in thread_ids_to_fetch]
@@ -978,8 +983,11 @@ class BatchLeaveView(ui.View):
 
         async def fetch_thread(thread_id):
             try:
-                return await interaction.guild.fetch_channel(thread_id)
-            except (discord.NotFound, discord.Forbidden):
+                return await retry_on_discord_error(
+                    lambda: interaction.guild.fetch_channel(thread_id),
+                    f"批量退出 - 获取帖子 {thread_id}"
+                )
+            except (discord.NotFound, discord.Forbidden, discord.errors.DiscordServerError):
                 return None
         
         tasks = [fetch_thread(tid) for tid in self.selected_to_leave_ids]
@@ -1031,8 +1039,11 @@ class BatchLeaveView(ui.View):
 
         async def fetch_thread(thread_id):
             try:
-                return await interaction.guild.fetch_channel(thread_id)
-            except (discord.NotFound, discord.Forbidden):
+                return await retry_on_discord_error(
+                    lambda: interaction.guild.fetch_channel(thread_id),
+                    f"批量操作 - 获取帖子 {thread_id}"
+                )
+            except (discord.NotFound, discord.Forbidden, discord.errors.DiscordServerError):
                 return None
         
         tasks = [fetch_thread(tid) for tid in self.selected_to_leave_ids]

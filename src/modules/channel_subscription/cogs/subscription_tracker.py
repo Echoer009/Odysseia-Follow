@@ -6,6 +6,7 @@ import asyncio
 from typing import List, TYPE_CHECKING
 
 # --- Service and View Imports ---
+from src.core.utils import retry_on_discord_error
 from src.modules.channel_subscription.services.subscription_service import SubscriptionService
 from src.modules.user_profile_feature.cogs.views import SubscriptionManageView, SubscriptionMenuView
 
@@ -134,10 +135,22 @@ class SubscriptionTracker(commands.Cog, name="SubscriptionTracker"):
             chunk = user_ids[i:i + chunk_size]
             ping_message = " ".join([f"<@{user_id}>" for user_id in chunk])
             try:
-                message = await thread.send(ping_message)
-                await message.delete()
-                log_context['chunk_user_ids'] = chunk
-                logger.info("成功为频道订阅发送幽灵提及", extra=log_context)
+                try:
+                    # 使用重试逻辑发送消息
+                    message = await retry_on_discord_error(
+                        lambda: thread.send(ping_message),
+                        operation_name=f"发送幽灵提及到频道 {thread.id} (Chunk {i//chunk_size + 1})"
+                    )
+                    # 使用重试逻辑删除消息
+                    await retry_on_discord_error(
+                        lambda: message.delete(),
+                        operation_name=f"删除幽灵提及在频道 {thread.id} (Chunk {i//chunk_size + 1})"
+                    )
+                    log_context['chunk_user_ids'] = chunk
+                    logger.info("成功为频道订阅发送幽灵提及", extra=log_context)
+                except discord.errors.DiscordServerError:
+                    # 如果重试最终失败，只记录错误，不中断循环
+                    logger.error(f"为频道 {thread.id} 发送或删除幽灵提及最终失败", extra=log_context, exc_info=True)
             except discord.Forbidden:
                 logger.error("因权限不足，为频道订阅发送幽灵提及失败", extra=log_context, exc_info=True)
                 break

@@ -7,6 +7,7 @@ import logging
 import re
 import os
 from typing import Optional
+from src.core.utils import retry_on_discord_error
 from src.modules.competition_follow.models import Competition
 from src.modules.competition_follow.services.follow_service import FollowService
 from src.modules.competition_follow.services.parsing_service import parsing_service
@@ -133,10 +134,17 @@ class CompetitionTracker(commands.Cog):
             return
 
         try:
-            channel = self.bot.get_channel(channel_id) or await self.bot.fetch_channel(channel_id)
-            message = await channel.fetch_message(message_id)
+            # 使用重试逻辑获取频道和消息
+            channel = self.bot.get_channel(channel_id) or await retry_on_discord_error(
+                lambda: self.bot.fetch_channel(channel_id),
+                f"获取频道 {channel_id}"
+            )
+            message = await retry_on_discord_error(
+                lambda: channel.fetch_message(message_id),
+                f"获取消息 {message_id}"
+            )
             await self._internal_follow(interaction, message)
-        except (discord.NotFound, discord.Forbidden) as e:
+        except (discord.NotFound, discord.Forbidden, discord.errors.DiscordServerError) as e:
             log_context = {'user_id': interaction.user.id, 'guild_id': guild_id, 'channel_id': channel_id, 'message_id': message_id, 'error': str(e)}
             logger.warning("无法访问斜杠命令所需的消息", extra=log_context)
             await interaction.followup.send("❌ **无法访问**：请检查链接是否正确，以及检查bot是否有权限查看该频道和消息。", ephemeral=True)
@@ -174,13 +182,26 @@ class CompetitionTracker(commands.Cog):
         for competition in all_competitions:
             log_context = {'competition_message_id': competition.message_id, 'channel_id': competition.channel_id}
             try:
-                channel = self.bot.get_channel(competition.channel_id) or await self.bot.fetch_channel(competition.channel_id)
-                message = await channel.fetch_message(competition.message_id)
+                # 使用重试逻辑获取频道和消息
+                channel = self.bot.get_channel(competition.channel_id) or await retry_on_discord_error(
+                    lambda: self.bot.fetch_channel(competition.channel_id),
+                    f"检查比赛 - 获取频道 {competition.channel_id}"
+                )
+                if not channel:
+                    logger.warning(f"无法找到频道 {competition.channel_id}，跳过比赛检查。", extra=log_context)
+                    continue
+                
+                message = await retry_on_discord_error(
+                    lambda: channel.fetch_message(competition.message_id),
+                    f"检查比赛 - 获取消息 {competition.message_id}"
+                )
                 await self._process_competition_update(message, competition)
             except discord.NotFound:
                 logger.warning("比赛消息未找到，可能已被删除。", extra=log_context)
             except discord.Forbidden:
                 logger.error("访问比赛消息时权限不足。", extra=log_context)
+            except discord.errors.DiscordServerError:
+                logger.error("在所有重试后，获取比赛信息最终失败。", extra=log_context, exc_info=True)
             except Exception as e:
                 logger.error("处理比赛时发生未知错误。", extra=log_context, exc_info=True)
 
