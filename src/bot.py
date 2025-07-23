@@ -10,7 +10,6 @@ from src.modules.user_profile_feature.services.profile_service import ProfileSer
 from src.modules.channel_subscription.services.subscription_service import SubscriptionService
 from src.modules.thread_favorites.services.favorites_service import FavoritesService
 from src.modules.thread_favorites.services.scanner_service import ActiveThreadScanner
-from src.modules.thread_favorites.services.joiner_service import ThreadJoiner
 import logging
 from src.core.logging_setup import setup_logging
 
@@ -53,7 +52,6 @@ class MyBot(commands.Bot):
         self.favorites_service: FavoritesService | None = None
         self.db_backup_task: asyncio.Task | None = None
         self.scanner_service: ActiveThreadScanner | None = None
-        self.thread_joiner_service: ThreadJoiner | None = None
 
     def _load_resource_channels(self) -> set[int]:
         """从环境变量加载并解析需要监听的频道ID"""
@@ -85,7 +83,6 @@ class MyBot(commands.Bot):
         self.subscription_service = SubscriptionService(self.db)
         self.favorites_service = FavoritesService(self.db)
         self.scanner_service = ActiveThreadScanner(self, self.db)
-        self.thread_joiner_service = ThreadJoiner(self, self.db)
         logger.info("✅ 核心服务初始化完成。")
 
         logger.info("--- 🧩 2. 加载功能模块 (Cogs) ---")
@@ -141,9 +138,6 @@ class MyBot(commands.Bot):
         else:
             logger.warning("  - [跳过] 活跃帖子扫描服务已禁用。")
 
-        # 帖子加入器
-        self.thread_joiner_service.start()
-        logger.info("  - [启动] 帖子自动加入服务。")
 
     async def close(self):
         """在机器人关闭时，优雅地清理资源。"""
@@ -165,9 +159,6 @@ class MyBot(commands.Bot):
             self.scanner_service.stop()
             logger.info("活跃帖子扫描任务已停止。")
         
-        if self.thread_joiner_service and self.thread_joiner_service.task and not self.thread_joiner_service.task.done():
-            self.thread_joiner_service.stop()
-            logger.info("帖子自动加入任务已停止。")
 
         # 关闭数据库连接
         if self.db and self.db.conn:
