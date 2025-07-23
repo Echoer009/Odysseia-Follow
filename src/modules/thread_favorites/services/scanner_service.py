@@ -19,69 +19,43 @@ class ActiveThreadScanner:
         except (ValueError, TypeError):
             self.concurrent_tasks = 25
             self.chunk_delay = 0.5
-        # 创建一个信号量，用于限制并发的“加入帖子”请求数量，防止速率限制。
-        # 这就像一个只允许1个请求同时通过的门，可以有效避免请求风暴。
-        self.join_semaphore = asyncio.Semaphore(1)
-        logger.info(f"扫描服务已配置：并发数={self.concurrent_tasks}, 批次延迟={self.chunk_delay}s, 加入并发数=1")
+        logger.info(
+            f"扫描服务已配置：并发数={self.concurrent_tasks}, "
+            f"批次延迟={self.chunk_delay}s"
+        )
 
     async def _process_thread(self, thread: discord.Thread, guild_id: int):
         """
-        处理单个帖子的逻辑。
-        如果缓存显示机器人不是成员，则会二次核查。
+        高效处理单个帖子的逻辑：直接尝试获取成员列表。
         """
-        # 1. 检查缓存中的成员状态，如果显示未加入，则进行二次核查
-        if thread.me is None:
-            try:
-                logger.debug(f"缓存显示未加入帖子 '{thread.name}' (ID: {thread.id})，正在二次核查...")
-                # 使用 fetch_channel 获取最新的帖子对象，覆盖掉可能过时的缓存对象
-                thread = await self.bot.fetch_channel(thread.id)
-                if not isinstance(thread, discord.Thread):
-                    logger.warning(f"对象 (ID: {thread.id}) 在二次核查时发现不是帖子。")
-                    return thread, 0, None  # 无法处理
-            except (discord.NotFound, discord.Forbidden):
-                # 尝试获取帖子类型以提供更丰富的日志
-                privacy_status = "未知"
-                if thread.type == discord.ChannelType.private_thread:
-                    privacy_status = "私密帖子"
-                elif thread.type == discord.ChannelType.public_thread:
-                    privacy_status = "公开帖子"
-                elif thread.type == discord.ChannelType.news_thread:
-                    privacy_status = "新闻帖子"
+        try:
+            # 无论是否已加入，都直接尝试获取成员列表，这是最高效的方式。
+            members = await thread.fetch_members()
+            
+            member_ids = [member.id for member in members]
+            await self.db.update_active_thread_members(thread.id, thread.name, member_ids, guild_id)
+            logger.debug(f"已处理成员帖子 '{thread.name}'，找到 {len(member_ids)} 个成员。")
+            return thread, len(member_ids), None
 
-                logger.warning(
-                    f"\n--- 二次核查失败事件 ---\n"
-                    f"  帖子: '{thread.name}' (ID: {thread.id})\n"
-                    f"  状态: 无法访问 (可能已被删除或无权限)。\n"
-                    f"  推测类型: {privacy_status}\n"
-                    f"  操作: 已跳过，不会加入队列。\n"
-                    f"--------------------------"
-                )
-                return thread, 0, None  # 无法处理
-            except Exception as e:
-                logger.error(f"二次核查帖子 (ID: {thread.id}) 时发生未知错误: {e}", exc_info=True)
-                return thread, 0, None  # 无法处理
+        except discord.Forbidden:
+            # 如果被禁止，说明是私密帖子或无权访问，直接跳过，不尝试加入。
+            logger.debug(f"无法访问帖子 '{thread.name}' (ID: {thread.id}) 的成员列表 (无权限)，已跳过。")
+            return thread, 0, None
+        
+        except discord.NotFound:
+            # 帖子已被删除或归档。
+            logger.debug(f"帖子 '{thread.name}' (ID: {thread.id}) 在尝试获取成员时未找到，可能已被删除。")
+            return thread, 0, None
 
-        # 2. 经过二次核查（如果需要），现在我们有了更新的帖子对象，再次检查成员状态
-        if thread.me is None:
-            # 确认未加入
-            if not thread.archived and not thread.locked:
-                await self.db.add_thread_to_join_queue(thread.id, guild_id)
-                logger.debug(f"确认未加入帖子 '{thread.name}' (ID: {thread.id})，已添加到待办队列。")
-            return thread, 0, None  # 扫描器的任务完成
-        else:
-            # 确认已加入 (无论是最初缓存正确，还是二次核查后发现)
-            try:
-                members = await thread.fetch_members()
-                member_ids = [member.id for member in members]
-                await self.db.update_active_thread_members(thread.id, thread.name, member_ids, guild_id)
-                logger.debug(f"已处理成员帖子 '{thread.name}'，找到 {len(member_ids)} 个成员。")
-                return thread, len(member_ids), None
-            except discord.HTTPException as e:
-                logger.warning(f"获取帖子 '{thread.name}' 的成员失败: {e}。跳过此帖。")
-                return thread, None, e
-            except Exception as e:
-                logger.error(f"处理帖子 '{thread.name}' 时发生未知错误: {e}", exc_info=True)
-                return thread, None, e
+        except discord.HTTPException as e:
+            # 其他HTTP异常，如速率限制（理论上会被信号量控制，但作为保险）。
+            logger.warning(f"获取帖子 '{thread.name}' (ID: {thread.id}) 的成员时发生HTTP异常: {e}。跳过此帖。")
+            return thread, None, e
+            
+        except Exception as e:
+            # 未知错误
+            logger.error(f"处理帖子 '{thread.name}' (ID: {thread.id}) 时发生未知错误: {e}", exc_info=True)
+            return thread, None, e
 
     async def scan_guild(self, guild: discord.Guild):
         """对单个服务器执行并发扫描和数据更新。此方法现在是线程安全的。"""
