@@ -7,6 +7,7 @@ import asyncio
 import os
 import logging
 from typing import TYPE_CHECKING
+from src.core.utils import retry_on_discord_error
 
 if TYPE_CHECKING:
     from src.bot import OdysseiaBot
@@ -107,7 +108,10 @@ class AuthorTracker(commands.Cog):
             if not author_id:
                 return
 
-            author = thread.owner or await self.bot.fetch_user(author_id)
+            author = thread.owner or await retry_on_discord_error(
+                lambda: self.bot.fetch_user(author_id),
+                f"获取作者信息 (ID: {author_id})"
+            )
             if not author:
                 logger.warning("无法找到作者用户对象", extra={'author_id': author_id})
                 return
@@ -148,10 +152,18 @@ class AuthorTracker(commands.Cog):
             chunk = user_ids[i:i + chunk_size]
             ping_message = " ".join([f"<@{user_id}>" for user_id in chunk])
             try:
-                message = await thread.send(ping_message)
-                await message.delete()
+                message = await retry_on_discord_error(
+                    lambda: thread.send(ping_message),
+                    f"发送作者关注幽灵提及到频道 {thread.id}"
+                )
+                await retry_on_discord_error(
+                    lambda: message.delete(),
+                    f"删除作者关注幽灵提及在频道 {thread.id}"
+                )
                 log_context['chunk_user_ids'] = chunk
                 logger.info("成功为作者关注者发送幽灵提及", extra=log_context)
+            except discord.errors.DiscordServerError:
+                logger.error(f"为频道 {thread.id} 发送或删除作者关注幽灵提及最终失败", extra=log_context, exc_info=True)
             except Exception as e:
                 log_context['chunk_user_ids'] = chunk
                 logger.error("为作者关注发送幽灵提及失败", extra=log_context, exc_info=True)
@@ -166,7 +178,10 @@ class AuthorTracker(commands.Cog):
             await interaction.response.send_message("此命令只能在论坛帖子中使用。", ephemeral=True)
             return
         try:
-            author = interaction.channel.owner or await self.bot.fetch_user(interaction.channel.owner_id)
+            author = interaction.channel.owner or await retry_on_discord_error(
+                lambda: self.bot.fetch_user(interaction.channel.owner_id),
+                f"获取帖子作者信息 (ID: {interaction.channel.owner_id})"
+            )
             if not author:
                 await interaction.response.send_message("❌ 无法找到该帖子的作者信息，操作失败。", ephemeral=True)
                 return
@@ -190,7 +205,10 @@ class AuthorTracker(commands.Cog):
             await interaction.response.send_message("❌ 此命令只能在论坛帖子中使用。", ephemeral=True)
             return
         try:
-            author = interaction.channel.owner or await self.bot.fetch_user(interaction.channel.owner_id)
+            author = interaction.channel.owner or await retry_on_discord_error(
+                lambda: self.bot.fetch_user(interaction.channel.owner_id),
+                f"获取帖子作者信息 (ID: {interaction.channel.owner_id})"
+            )
             result = await self.author_follow_service.unfollow_author(interaction.user.id, interaction.channel.owner_id)
             await _handle_unfollow_response(interaction, result, author)
         except Exception as e:
