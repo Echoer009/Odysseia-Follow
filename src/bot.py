@@ -20,6 +20,10 @@ TOKEN = os.getenv('DISCORD_TOKEN')
 # 获取一个logger实例
 logger = logging.getLogger(__name__)
 
+def no_prefix(bot, message):
+    """一个不返回任何前缀的 callable，用于有效禁用基于前缀的命令。"""
+    return []
+
 class MyBot(commands.Bot):
     def __init__(self):
         logger.info("--- ⌛ 0. 环境与配置加载 ---")
@@ -42,7 +46,7 @@ class MyBot(commands.Bot):
         intents = discord.Intents.default()
         intents.message_content = True
         intents.members = True  # 确保开启了成员意图，以便获取用户信息
-        super().__init__(command_prefix="!", intents=intents)
+        super().__init__(command_prefix=no_prefix, intents=intents)
         
         # 2. 更新服务属性的名称和类型提示
         self.db: Database | None = None
