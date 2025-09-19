@@ -41,11 +41,11 @@ class AuthorTracker(commands.Cog):
 
         # --- 正确的右键菜单注册方式 ---
         self.follow_menu = app_commands.ContextMenu(
-            name="⭐ 关注此消息作者",
+            name="⭐ 关注该作者",
             callback=self.follow_this_author_context,
         )
         self.unfollow_menu = app_commands.ContextMenu(
-            name="➖ 取关此消息作者",
+            name="➖ 取关该作者",
             callback=self.unfollow_this_author_context,
         )
         self.bot.tree.add_command(self.follow_menu)
@@ -57,33 +57,33 @@ class AuthorTracker(commands.Cog):
         self.bot.tree.remove_command(self.unfollow_menu.name, type=self.unfollow_menu.type)
 
     # --- 右键菜单命令的回调方法  ---
-    async def follow_this_author_context(self, interaction: discord.Interaction, message: discord.Message):
+    async def follow_this_author_context(self, interaction: discord.Interaction, user: discord.Member):
         try:
-            author = message.author
+            author = user
             result = await self.author_follow_service.follow_author(interaction.user.id, author.id, author.name)
             await _handle_follow_response(interaction, result, author)
         except Exception as e:
             log_context = {
                 'user_id': interaction.user.id,
                 'guild_id': interaction.guild_id,
-                'target_user_id': message.author.id,
-                'command': '右键菜单: 关注此消息作者'
+                'target_user_id': user.id,
+                'command': '右键菜单: 关注该作者'
             }
             logger.error("右键菜单命令执行失败", extra=log_context, exc_info=True)
             if not interaction.response.is_done():
                 await interaction.response.send_message("哎呀，操作失败了。请稍后再试或联系管理员。", ephemeral=True)
 
-    async def unfollow_this_author_context(self, interaction: discord.Interaction, message: discord.Message):
+    async def unfollow_this_author_context(self, interaction: discord.Interaction, user: discord.Member):
         try:
-            author = message.author
+            author = user
             result = await self.author_follow_service.unfollow_author(interaction.user.id, author.id)
             await _handle_unfollow_response(interaction, result, author)
         except Exception as e:
             log_context = {
                 'user_id': interaction.user.id,
                 'guild_id': interaction.guild_id,
-                'target_user_id': message.author.id,
-                'command': '右键菜单: 取关此消息作者'
+                'target_user_id': user.id,
+                'command': '右键菜单: 取关该作者'
             }
             logger.error("右键菜单命令执行失败", extra=log_context, exc_info=True)
             if not interaction.response.is_done():

@@ -1,3 +1,4 @@
+import sys
 import discord
 from discord.ext import commands
 import os
@@ -19,6 +20,14 @@ TOKEN = os.getenv('DISCORD_TOKEN')
 
 # 获取一个logger实例
 logger = logging.getLogger(__name__)
+
+if sys.platform != "win32":
+    try:
+        import uvloop
+        uvloop.install()
+        logger.info("已成功启用 uvloop 作为 asyncio 事件循环")
+    except ImportError:
+        logger.warning("尝试启用 uvloop 失败，将使用默认事件循环")
 
 def no_prefix(bot, message):
     """一个不返回任何前缀的 callable，用于有效禁用基于前缀的命令。"""
