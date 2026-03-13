@@ -1,9 +1,10 @@
 # src/modules/competition_follow/services/follow_service.py
 
 import discord
-from typing import Optional
+from typing import Optional, Union
 from src.core.database import Database
 from src.modules.competition_follow.models import Competition
+
 
 class FollowService:
     """
@@ -13,7 +14,14 @@ class FollowService:
     def __init__(self, db: Database):
         self.db = db
 
-    async def follow_competition(self, user: discord.User, channel_id: int, message_id: int, guild_id: int, initial_ids: list[str]) -> bool:
+    async def follow_competition(
+        self,
+        user: Union[discord.User, discord.Member],
+        channel_id: int,
+        message_id: int,
+        guild_id: int,
+        initial_ids: list[str],
+    ) -> bool:
         """
         让一个用户关注一个特定的比赛。
         这会首先确保比赛存在于数据库中，然后添加用户订阅。
@@ -22,10 +30,14 @@ class FollowService:
             bool: 如果是新的关注，返回True；如果已关注，返回False。
         """
         # 核心逻辑：先确保比赛记录存在（如果不存在则创建），然后再添加订阅者。
-        await self.db.ensure_competition_exists(message_id, channel_id, guild_id, initial_ids)
+        await self.db.ensure_competition_exists(
+            message_id, channel_id, guild_id, initial_ids
+        )
         return await self.db.add_competition_subscriber(user.id, message_id)
 
-    async def unfollow_competition(self, user: discord.User, message_id: int) -> bool:
+    async def unfollow_competition(
+        self, user: Union[discord.User, discord.Member], message_id: int
+    ) -> bool:
         """
         让一个用户取消关注一个比赛。
 
@@ -62,6 +74,7 @@ class FollowService:
         """获取所有被关注的比赛列表。"""
         competitions_data = await self.db.get_all_followed_competitions()
         return [Competition(**data) for data in competitions_data]
+
 
 # 注意：这个服务需要在Cog中用 bot.db 实例来初始化。
 # 例如: self.follow_service = FollowService(bot.db)
