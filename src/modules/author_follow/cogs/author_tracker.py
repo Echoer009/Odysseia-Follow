@@ -70,11 +70,11 @@ class AuthorTracker(commands.Cog):
 
         # --- 正确的右键菜单注册方式 ---
         self.follow_menu = app_commands.ContextMenu(
-            name="⭐ 关注此消息作者",
+            name="⭐ 关注该作者",
             callback=self.follow_this_author_context,
         )
         self.unfollow_menu = app_commands.ContextMenu(
-            name="➖ 取关此消息作者",
+            name="➖ 取关该作者",
             callback=self.unfollow_this_author_context,
         )
         self.bot.tree.add_command(self.follow_menu)
