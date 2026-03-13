@@ -2,7 +2,7 @@ import logging
 import sys
 import os
 from logging.handlers import TimedRotatingFileHandler
-from pythonjsonlogger import jsonlogger
+from pythonjsonlogger.jsonlogger import JsonFormatter  # type: ignore
 
 
 def setup_logging():
@@ -30,9 +30,9 @@ def setup_logging():
     )
 
     # --- 文件格式化器 (JSON) ---
-    json_formatter = jsonlogger.JsonFormatter(
+    json_formatter = JsonFormatter(
         "%(asctime)s %(levelname)s %(message)s",
-        rename_fields={"asctime": "timestamp", "levelname": "level"},
+        rename_fields={"asctime": "timestamp", "levelname": "level"},  # type: ignore
         json_ensure_ascii=False,
     )
 

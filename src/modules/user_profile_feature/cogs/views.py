@@ -4,7 +4,7 @@ from discord import ui
 import math
 import os
 import logging
-from typing import TYPE_CHECKING, List
+from typing import TYPE_CHECKING, List, Optional, cast, Any
 
 from src.modules.thread_favorites.services.favorites_service import FavoritesService
 
@@ -60,7 +60,7 @@ class MainMenuView(ui.View):
             )
             embed = view.create_embed()
             await interaction.edit_original_response(embed=embed, view=view)
-        except Exception as e:
+        except Exception:
             log_context = {
                 "user_id": interaction.user.id,
                 "guild_id": interaction.guild_id,
@@ -88,7 +88,7 @@ class MainMenuView(ui.View):
                     view=None,
                     embed=None,
                 )
-        except Exception as e:
+        except Exception:
             log_context = {
                 "user_id": interaction.user.id,
                 "guild_id": interaction.guild_id,
@@ -110,11 +110,10 @@ class MainMenuView(ui.View):
         await interaction.response.defer()
         try:
             favorites_service = self.profile_cog.bot.favorites_service
-            view = FavoritesManageView(
-                self.profile_cog, favorites_service, interaction.user
-            )
+            user = cast(discord.User, interaction.user)
+            view = FavoritesManageView(self.profile_cog, favorites_service, user)
             await view.send_initial_message(interaction)
-        except Exception as e:
+        except Exception:
             log_context = {
                 "user_id": interaction.user.id,
                 "guild_id": interaction.guild_id,
@@ -146,7 +145,7 @@ class FollowsManageView(ui.View):
         start = self.current_page * self.page_size
         return self.all_authors[start : start + self.page_size]
 
-    def create_embed(self, success_message: str = None) -> discord.Embed:
+    def create_embed(self, success_message: Optional[str] = None) -> discord.Embed:
         page_authors = self.get_current_page_authors()
         description_lines = []
         if not page_authors:
@@ -223,7 +222,8 @@ class FollowsManageView(ui.View):
         )
 
         await interaction.response.defer()
-        author_id = int(interaction.data["values"][0])
+        data = cast(dict[str, Any], interaction.data)
+        author_id = int(data["values"][0])
         result = await self.author_follow_service.unfollow_author(
             self.user_id, author_id
         )
@@ -284,7 +284,7 @@ class SubscriptionManageView(ui.View):
         self.user_id = user_id
         self.channel_id = channel_id
         self.service = sub_cog.subscription_service
-        self.message: discord.Message = None
+        self.message: Optional[discord.Message] = None
 
     async def update_embed(self):
         embed = await self.sub_cog.create_subscription_embed(
@@ -330,7 +330,7 @@ class SubscriptionManageView(ui.View):
             await self.sub_cog.send_main_subscription_view(
                 interaction, self.profile_cog
             )
-        except Exception as e:
+        except Exception:
             log_context = {"user_id": self.user_id, "channel_id": self.channel_id}
             logger.error("取消关注频道失败", extra=log_context, exc_info=True)
             await interaction.edit_original_response(
@@ -466,7 +466,8 @@ class SubscriptionMenuView(ui.View):
 
     async def select_channel_callback(self, interaction: discord.Interaction):
         await interaction.response.defer()
-        channel_id = int(interaction.data["values"][0])
+        data = cast(dict[str, Any], interaction.data)
+        channel_id = int(data["values"][0])
         await self.sub_cog.send_subscription_manage_ui(
             interaction, self.user_id, channel_id, self.profile_cog
         )
@@ -496,7 +497,9 @@ CHANNEL_PAGE_SIZE = 25
 
 class ChannelMultiSelect(ui.Select):
     def __init__(
-        self, channels: List[discord.ForumChannel], selected_values: List[str] = None
+        self,
+        channels: List[discord.ForumChannel],
+        selected_values: Optional[List[str]] = None,
     ):
         self.all_channels = channels
         self.selected_values = selected_values or []
@@ -592,6 +595,7 @@ class ChannelSelectView(ui.View):
 
     @ui.button(label="◀ 上一页", style=discord.ButtonStyle.secondary, row=1)
     async def prev_page(self, interaction: discord.Interaction, button: ui.Button):
+        await interaction.response.defer()
         # 保存当前页的选中状态
         if self.select_menu.values and self.select_menu.values[0] != "disabled":
             for val in self.select_menu.values:
@@ -604,6 +608,7 @@ class ChannelSelectView(ui.View):
 
     @ui.button(label="▶ 下一页", style=discord.ButtonStyle.secondary, row=1)
     async def next_page(self, interaction: discord.Interaction, button: ui.Button):
+        await interaction.response.defer()
         # 保存当前页的选中状态
         if self.select_menu.values and self.select_menu.values[0] != "disabled":
             for val in self.select_menu.values:
@@ -656,7 +661,7 @@ class ChannelSelectView(ui.View):
         for channel_id_str in self.selected_channel_ids:
             try:
                 await service.follow_channel(self.user_id, int(channel_id_str))
-            except Exception as e:
+            except Exception:
                 log_context = {"user_id": self.user_id, "channel_id": channel_id_str}
                 logger.error(
                     "在多选流程中关注频道失败", extra=log_context, exc_info=True
@@ -771,7 +776,9 @@ class FavoritesManageView(ui.View):
         )
 
         if not favorites:
-            embed.description += "\n\n*您还没有收藏任何帖子。*"
+            embed.description = (
+                embed.description or ""
+            ) + "\n\n*您还没有收藏任何帖子。*"
         else:
             for fav in favorites:
                 thread_link = (
@@ -807,7 +814,7 @@ class FavoritesManageView(ui.View):
         """
         # 1. Check for cooldown
         bucket = self.profile_cog.refresh_cooldown.get_bucket(interaction.message)
-        retry_after = bucket.update_rate_limit()
+        retry_after = bucket.update_rate_limit() if bucket else None
         if retry_after:
             # User is on cooldown, inform them and do nothing.
             await interaction.response.send_message(
@@ -832,14 +839,14 @@ class FavoritesManageView(ui.View):
 
             await self.update_view_internals()
             embed = await self.create_favorites_embed()
-            embed.description = f"✅ **刷新成功！**\n\n" + (embed.description or "")
+            embed.description = "✅ **刷新成功！**\n\n" + (embed.description or "")
 
             await interaction.edit_original_response(content="", embed=embed, view=self)
 
-        except Exception as e:
+        except Exception:
             log_context = {
                 "user_id": interaction.user.id,
-                "guild_id": interaction.guild.id,
+                "guild_id": interaction.guild.id if interaction.guild else None,
             }
             logger.error("手动刷新数据库失败", extra=log_context, exc_info=True)
             error_embed = discord.Embed(
@@ -856,13 +863,16 @@ class FavoritesManageView(ui.View):
             content="正在加载可收藏的帖子列表...", embed=None, view=None
         )
 
+        guild = interaction.guild
+        if guild is None:
+            return
         unfavorited_threads_data = (
             await self.favorites_service.get_unfavorited_threads_for_user(
-                self.user, interaction.guild
+                self.user, guild
             )
         )
 
-        log_context = {"user_id": interaction.user.id, "guild_id": interaction.guild.id}
+        log_context = {"user_id": interaction.user.id, "guild_id": guild.id}
         logger.info(
             f"获取到 {len(unfavorited_threads_data)} 个可收藏的帖子。",
             extra=log_context,
@@ -888,7 +898,7 @@ class FavoritesManageView(ui.View):
             self.profile_cog,
             self.favorites_service,
             self.user,
-            unfavorited_threads_data,
+            cast(List[dict[str, Any]], unfavorited_threads_data),
         )
         embed = view.create_embed()
         await interaction.edit_original_response(content="", embed=embed, view=view)
@@ -923,8 +933,11 @@ class FavoritesManageView(ui.View):
             content="⌛ 正在加载活跃帖子列表...", embed=None, view=None
         )
 
+        guild = interaction.guild
+        if guild is None:
+            return
         active_threads_data = await self.favorites_service.get_active_threads_for_user(
-            self.user, interaction.guild
+            self.user, guild
         )
 
         # 无论是否有活跃帖子，都创建 BatchLeaveView，让它自己处理显示逻辑
@@ -951,7 +964,7 @@ class BatchFavoriteConfirmView(ui.View):
         profile_cog: "UserProfileCog",
         favorites_service: FavoritesService,
         user: discord.User,
-        unfavorited_threads: List[discord.Thread],
+        unfavorited_threads: List[Any],
     ):
         timeout = int(os.getenv("BATCH_FAVORITE_CONFIRM_VIEW_TIMEOUT_SECONDS", "180"))
         super().__init__(timeout=timeout)
@@ -992,8 +1005,9 @@ class BatchFavoriteConfirmView(ui.View):
         # Display a few thread names as examples
         if self.unfavorited_threads:
             # The data is now a list of dicts, not thread objects
+            threads_data = cast(List[dict[str, Any]], self.unfavorited_threads)
             sample_threads = "\n".join(
-                f"- {t['thread_name']}" for t in self.unfavorited_threads[:5]
+                f"- {t['thread_name']}" for t in threads_data[:5]
             )
             embed.add_field(name="帖子示例:", value=sample_threads, inline=False)
 
@@ -1015,12 +1029,17 @@ class BatchFavoriteConfirmView(ui.View):
         await interaction.response.edit_message(embed=processing_embed, view=self)
 
         # We need to fetch the thread objects before favoriting
-        thread_ids_to_fetch = [t["thread_id"] for t in self.unfavorited_threads]
+        threads_data = cast(List[dict[str, Any]], self.unfavorited_threads)
+        thread_ids_to_fetch = [t["thread_id"] for t in threads_data]
+
+        guild = interaction.guild
+        if guild is None:
+            return
 
         async def fetch_thread(thread_id):
             try:
                 return await retry_on_discord_error(
-                    lambda: interaction.guild.fetch_channel(thread_id),
+                    lambda: guild.fetch_channel(thread_id),
                     f"批量收藏 - 获取帖子 {thread_id}",
                 )
             except (
@@ -1031,7 +1050,9 @@ class BatchFavoriteConfirmView(ui.View):
                 return None
 
         tasks = [fetch_thread(tid) for tid in thread_ids_to_fetch]
-        threads_to_favorite = [t for t in await asyncio.gather(*tasks) if t is not None]
+        threads_to_favorite = [
+            t for t in await asyncio.gather(*tasks) if isinstance(t, discord.Thread)
+        ]
 
         newly_favorited = await self.favorites_service.batch_favorite_threads(
             self.user, threads_to_favorite
@@ -1092,7 +1113,7 @@ class BatchUnfavoriteSelect(ui.Select):
         self.threads_on_this_page_ids = {fav["thread_id"] for fav in favorites_on_page}
 
     async def callback(self, interaction: discord.Interaction):
-        parent_view: "BatchUnfavoriteView" = self.view
+        parent_view = cast("BatchUnfavoriteView", self.view)
         parent_view.selected_to_unfavorite_ids.difference_update(
             self.threads_on_this_page_ids
         )
@@ -1287,7 +1308,7 @@ class BatchLeaveSelect(ui.Select):
         self.threads_on_this_page_ids = {t["thread_id"] for t in threads_data_on_page}
 
     async def callback(self, interaction: discord.Interaction):
-        parent_view: "BatchLeaveView" = self.view
+        parent_view = cast("BatchLeaveView", self.view)
         parent_view.selected_to_leave_ids.difference_update(
             self.threads_on_this_page_ids
         )
@@ -1433,10 +1454,14 @@ class BatchLeaveView(ui.View):
         )
         await interaction.response.edit_message(embed=processing_embed, view=self)
 
+        guild = interaction.guild
+        if guild is None:
+            return
+
         async def fetch_thread(thread_id):
             try:
                 return await retry_on_discord_error(
-                    lambda: interaction.guild.fetch_channel(thread_id),
+                    lambda: guild.fetch_channel(thread_id),
                     f"批量退出 - 获取帖子 {thread_id}",
                 )
             except (
@@ -1447,77 +1472,9 @@ class BatchLeaveView(ui.View):
                 return None
 
         tasks = [fetch_thread(tid) for tid in self.selected_to_leave_ids]
-        threads_to_leave = [t for t in await asyncio.gather(*tasks) if t is not None]
-
-        processing_embed.description = (
-            f"⚙️ 正在执行退出操作，共 **{len(threads_to_leave)}** 个帖子..."
-        )
-        await interaction.edit_original_response(embed=processing_embed, view=self)
-
-        succeeded, failed = await self.favorites_service.batch_leave_threads(
-            self.user, threads_to_leave
-        )
-
-        result_view = FavoritesManageView(
-            self.profile_cog, self.favorites_service, self.user
-        )
-        await result_view.update_view_internals()
-        result_embed = await result_view.create_favorites_embed()
-
-        summary = f"✅ **操作完成！**\n成功退出 **{succeeded}** 个帖子。"
-        if failed > 0:
-            summary += f"\n**{failed}** 个帖子因权限问题无法退出。"
-
-        result_embed.description = f"{summary}\n\n" + (result_embed.description or "")
-        await interaction.edit_original_response(embed=result_embed, view=result_view)
-
-    async def cancel_button(self, interaction: discord.Interaction):
-        await interaction.response.defer()
-        view = FavoritesManageView(self.profile_cog, self.favorites_service, self.user)
-        await view.send_initial_message(interaction)
-
-    def disable_all_components(self):
-        for item in self.children:
-            if isinstance(item, (ui.Button, ui.Select)):
-                item.disabled = True
-
-    async def confirm_button(self, interaction: discord.Interaction):
-        self.disable_all_components()
-        processing_embed = self.create_embed()
-        processing_embed.color = int(os.getenv("THEME_COLOR", "0x49989a"), 16)
-
-        if not self.selected_to_leave_ids:
-            processing_embed.description = (
-                "⚠️ **操作取消：** 您没有选择任何要退出的帖子。"
-            )
-            await interaction.response.edit_message(embed=processing_embed, view=self)
-            await asyncio.sleep(3)
-            view = FavoritesManageView(
-                self.profile_cog, self.favorites_service, self.user
-            )
-            await view.send_initial_message(interaction)
-            return
-
-        processing_embed.description = (
-            f"⚙️ 正在准备退出 **{len(self.selected_to_leave_ids)}** 个帖子，请稍候..."
-        )
-        await interaction.response.edit_message(embed=processing_embed, view=self)
-
-        async def fetch_thread(thread_id):
-            try:
-                return await retry_on_discord_error(
-                    lambda: interaction.guild.fetch_channel(thread_id),
-                    f"批量操作 - 获取帖子 {thread_id}",
-                )
-            except (
-                discord.NotFound,
-                discord.Forbidden,
-                discord.errors.DiscordServerError,
-            ):
-                return None
-
-        tasks = [fetch_thread(tid) for tid in self.selected_to_leave_ids]
-        threads_to_leave = [t for t in await asyncio.gather(*tasks) if t is not None]
+        threads_to_leave = [
+            t for t in await asyncio.gather(*tasks) if isinstance(t, discord.Thread)
+        ]
 
         processing_embed.description = (
             f"⚙️ 正在执行退出操作，共 **{len(threads_to_leave)}** 个帖子..."

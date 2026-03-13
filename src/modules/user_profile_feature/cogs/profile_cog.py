@@ -4,7 +4,6 @@ from discord import app_commands
 import logging
 import os
 from typing import TYPE_CHECKING
-from datetime import timedelta
 
 # --- Service Imports ---
 from src.modules.author_follow.services.author_follow_service import AuthorFollowService
@@ -14,20 +13,29 @@ from src.modules.user_profile_feature.services.profile_service import ProfileSer
 from .views import MainMenuView
 
 if TYPE_CHECKING:
-    from src.bot import OdysseiaBot
+    from src.bot import MyBot as OdysseiaBot
 
 logger = logging.getLogger(__name__)
+
 
 class UserProfileCog(commands.Cog):
     def __init__(self, bot: "OdysseiaBot"):
         self.bot = bot
-        self.author_follow_service: AuthorFollowService = bot.author_follow_service
-        self.profile_service: ProfileService = bot.profile_service
+        self.author_follow_service: AuthorFollowService | None = (
+            bot.author_follow_service
+        )
+        self.profile_service: ProfileService | None = bot.profile_service
         # Cooldown for the refresh button, configurable via .env
-        cooldown_seconds = int(os.getenv('REFRESH_COOLDOWN_SECONDS', '1800')) # Default to 30 minutes
-        self.refresh_cooldown = commands.CooldownMapping.from_cooldown(1, cooldown_seconds, commands.BucketType.user)
+        cooldown_seconds = int(
+            os.getenv("REFRESH_COOLDOWN_SECONDS", "1800")
+        )  # Default to 30 minutes
+        self.refresh_cooldown = commands.CooldownMapping.from_cooldown(
+            1, cooldown_seconds, commands.BucketType.user
+        )
 
-    @app_commands.command(name="我的关注", description="在面板中管理您关注的作者,频道和收藏夹")
+    @app_commands.command(
+        name="我的关注", description="在面板中管理您关注的作者,频道和收藏夹"
+    )
     async def my_follows(self, interaction: discord.Interaction):
         try:
             # Defer interaction to avoid timeout, and make it thinking
@@ -39,17 +47,19 @@ class UserProfileCog(commands.Cog):
 
             # Send the view to the user
             await interaction.followup.send(embed=embed, view=view, ephemeral=True)
-        except Exception as e:
+        except Exception:
             log_context = {
-                'user_id': interaction.user.id,
-                'guild_id': interaction.guild_id,
-                'command': '/我的关注'
+                "user_id": interaction.user.id,
+                "guild_id": interaction.guild_id,
+                "command": "/我的关注",
             }
             logger.error("执行 /我的关注 命令失败", extra=log_context, exc_info=True)
             # Check if the interaction is still valid before sending a followup
             if not interaction.is_expired():
-                await interaction.followup.send("发生了一个未知错误，请联系管理员。", ephemeral=True)
+                await interaction.followup.send(
+                    "发生了一个未知错误，请联系管理员。", ephemeral=True
+                )
 
 
-async def setup(bot: commands.Bot):
+async def setup(bot: "OdysseiaBot"):
     await bot.add_cog(UserProfileCog(bot))

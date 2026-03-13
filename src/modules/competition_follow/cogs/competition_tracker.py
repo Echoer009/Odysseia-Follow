@@ -6,25 +6,31 @@ from discord import app_commands
 import logging
 import re
 import os
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 from src.core.utils import retry_on_discord_error
 from src.modules.competition_follow.models import Competition
 from src.modules.competition_follow.services.follow_service import FollowService
 from src.modules.competition_follow.services.parsing_service import parsing_service
-from src.modules.competition_follow.services.notification_service import NotificationService
+from src.modules.competition_follow.services.notification_service import (
+    NotificationService,
+)
+
+if TYPE_CHECKING:
+    from src.bot import MyBot
 
 logger = logging.getLogger(__name__)
+
 
 class CompetitionTracker(commands.Cog):
     """
     一个Cog，用于跟踪比赛信息并通过私信通知用户。
     """
 
-    def __init__(self, bot: commands.Bot):
+    def __init__(self, bot: "MyBot"):
         self.bot = bot
         self.notification_service = NotificationService(bot)
-        self.follow_service = FollowService(bot.db)
-        
+        self.follow_service = FollowService(bot.db)  # type: ignore
+
         # --- 右键菜单命令 ---
         self.follow_competition_menu = app_commands.ContextMenu(
             name="⭐ 关注此杯赛",
@@ -42,70 +48,99 @@ class CompetitionTracker(commands.Cog):
     def cog_unload(self):
         """当 Cog 被卸载时，清理命令和任务，以支持热重载"""
         self.check_competitions.cancel()
-        self.bot.tree.remove_command(self.follow_competition_menu.name, type=self.follow_competition_menu.type)
-        self.bot.tree.remove_command(self.unfollow_competition_menu.name, type=self.unfollow_competition_menu.type)
+        self.bot.tree.remove_command(
+            self.follow_competition_menu.name, type=self.follow_competition_menu.type
+        )
+        self.bot.tree.remove_command(
+            self.unfollow_competition_menu.name,
+            type=self.unfollow_competition_menu.type,
+        )
 
     # ----------------------------------------------------------------
     # Command Logic Implementation (Internal)
     # ----------------------------------------------------------------
 
-    async def _internal_follow(self, interaction: discord.Interaction, message: discord.Message):
+    async def _internal_follow(
+        self, interaction: discord.Interaction, message: discord.Message
+    ):
         """处理关注比赛的核心逻辑，供所有命令调用。"""
         if not message.embeds:
-            await interaction.followup.send("❌ **操作失败**：此消息不包含可供追踪的 Embed。", ephemeral=True)
+            await interaction.followup.send(
+                "❌ **操作失败**：此消息不包含可供追踪的 Embed。", ephemeral=True
+            )
             return
 
         initial_ids = parsing_service.extract_submission_ids(message.embeds[0])
-        
+
+        # 获取 guild_id，message.guild 可能为 None
+        guild_id = message.guild.id if message.guild else 0
+
         success = await self.follow_service.follow_competition(
             user=interaction.user,
             channel_id=message.channel.id,
             message_id=message.id,
-            guild_id=message.guild.id,
-            initial_ids=initial_ids
+            guild_id=guild_id,
+            initial_ids=initial_ids,
         )
 
         log_context = {
-            'user_id': interaction.user.id,
-            'guild_id': message.guild.id,
-            'channel_id': message.channel.id,
-            'message_id': message.id,
-            'success': success
+            "user_id": interaction.user.id,
+            "guild_id": guild_id,
+            "channel_id": message.channel.id,
+            "message_id": message.id,
+            "success": success,
         }
         logger.info("用户尝试关注比赛", extra=log_context)
 
         if success:
-            await interaction.followup.send("✅ **关注成功**！当该杯赛有新作品提交时，您会收到私信通知。", ephemeral=True)
+            await interaction.followup.send(
+                "✅ **关注成功**！当该杯赛有新作品提交时，您会收到私信通知。",
+                ephemeral=True,
+            )
         else:
-            await interaction.followup.send("🤔 **重复操作**：您已经关注过这个杯赛了。", ephemeral=True)
+            await interaction.followup.send(
+                "🤔 **重复操作**：您已经关注过这个杯赛了。", ephemeral=True
+            )
 
-    async def _internal_unfollow(self, interaction: discord.Interaction, message_id: int):
+    async def _internal_unfollow(
+        self, interaction: discord.Interaction, message_id: int
+    ):
         """处理取消关注比赛的核心逻辑，供所有命令调用。"""
-        success = await self.follow_service.unfollow_competition(interaction.user, message_id)
+        success = await self.follow_service.unfollow_competition(
+            interaction.user, message_id
+        )
 
         log_context = {
-            'user_id': interaction.user.id,
-            'guild_id': interaction.guild_id,
-            'message_id': message_id,
-            'success': success
+            "user_id": interaction.user.id,
+            "guild_id": interaction.guild_id,
+            "message_id": message_id,
+            "success": success,
         }
         logger.info("用户尝试取关比赛", extra=log_context)
 
         if success:
-            await interaction.followup.send("✅ **操作成功**：您已取消关注该杯赛。", ephemeral=True)
+            await interaction.followup.send(
+                "✅ **操作成功**：您已取消关注该杯赛。", ephemeral=True
+            )
         else:
-            await interaction.followup.send("🤔 **重复操作**：您之前没有关注过这个杯赛。", ephemeral=True)
+            await interaction.followup.send(
+                "🤔 **重复操作**：您之前没有关注过这个杯赛。", ephemeral=True
+            )
 
     # ----------------------------------------------------------------
     # 右键命令
     # ----------------------------------------------------------------
 
-    async def follow_competition_context(self, interaction: discord.Interaction, message: discord.Message):
+    async def follow_competition_context(
+        self, interaction: discord.Interaction, message: discord.Message
+    ):
         """右键菜单 '关注此比赛' 的回调函数"""
         await interaction.response.defer(ephemeral=True)
         await self._internal_follow(interaction, message)
 
-    async def unfollow_competition_context(self, interaction: discord.Interaction, message: discord.Message):
+    async def unfollow_competition_context(
+        self, interaction: discord.Interaction, message: discord.Message
+    ):
         """右键菜单 '取消关注此比赛' 的回调函数"""
         await interaction.response.defer(ephemeral=True)
         await self._internal_unfollow(interaction, message.id)
@@ -114,7 +149,9 @@ class CompetitionTracker(commands.Cog):
     # 斜杠命令
     # ----------------------------------------------------------------
 
-    async def _parse_message_link(self, link: str) -> tuple[Optional[int], Optional[int], Optional[int]]:
+    async def _parse_message_link(
+        self, link: str
+    ) -> tuple[Optional[int], Optional[int], Optional[int]]:
         """从Discord消息链接中解析 guild_id, channel_id, 和 message_id。"""
         match = re.match(r"https://discord.com/channels/(\d+)/(\d+)/(\d+)", link)
         if not match:
@@ -122,55 +159,90 @@ class CompetitionTracker(commands.Cog):
         guild_id, channel_id, message_id = map(int, match.groups())
         return guild_id, channel_id, message_id
 
-    @app_commands.command(name="关注杯赛", description="通过消息链接关注一个杯赛，以接收新作品通知")
-    @app_commands.rename(message_link='消息链接')
-    async def follow_competition_slash(self, interaction: discord.Interaction, message_link: str):
+    @app_commands.command(
+        name="关注杯赛", description="通过消息链接关注一个杯赛，以接收新作品通知"
+    )
+    @app_commands.rename(message_link="消息链接")
+    async def follow_competition_slash(
+        self, interaction: discord.Interaction, message_link: str
+    ):
         await interaction.response.defer(ephemeral=True)
 
         guild_id, channel_id, message_id = await self._parse_message_link(message_link)
 
         if not all((guild_id, channel_id, message_id)):
-            await interaction.followup.send("❌ **格式错误**：请输入一个有效的 Discord 消息链接。", ephemeral=True)
+            await interaction.followup.send(
+                "❌ **格式错误**：请输入一个有效的 Discord 消息链接。", ephemeral=True
+            )
             return
 
         try:
             # 使用重试逻辑获取频道和消息
+            # 类型断言：前面已验证 channel_id 不为 None
+            assert channel_id is not None
+            assert message_id is not None
+
             channel = self.bot.get_channel(channel_id) or await retry_on_discord_error(
-                lambda: self.bot.fetch_channel(channel_id),
-                f"获取频道 {channel_id}"
+                lambda: self.bot.fetch_channel(channel_id), f"获取频道 {channel_id}"
             )
+            # 断言 channel 是 Messageable 类型
+            assert hasattr(channel, "fetch_message"), "频道不支持获取消息"
             message = await retry_on_discord_error(
-                lambda: channel.fetch_message(message_id),
-                f"获取消息 {message_id}"
+                lambda: channel.fetch_message(message_id),  # type: ignore
+                f"获取消息 {message_id}",
             )
             await self._internal_follow(interaction, message)
-        except (discord.NotFound, discord.Forbidden, discord.errors.DiscordServerError) as e:
-            log_context = {'user_id': interaction.user.id, 'guild_id': guild_id, 'channel_id': channel_id, 'message_id': message_id, 'error': str(e)}
+        except (
+            discord.NotFound,
+            discord.Forbidden,
+            discord.errors.DiscordServerError,
+        ) as e:
+            log_context = {
+                "user_id": interaction.user.id,
+                "guild_id": guild_id,
+                "channel_id": channel_id,
+                "message_id": message_id,
+                "error": str(e),
+            }
             logger.warning("无法访问斜杠命令所需的消息", extra=log_context)
-            await interaction.followup.send("❌ **无法访问**：请检查链接是否正确，以及检查bot是否有权限查看该频道和消息。", ephemeral=True)
-        except Exception as e:
-            log_context = {'user_id': interaction.user.id, 'guild_id': guild_id, 'channel_id': channel_id, 'message_id': message_id}
+            await interaction.followup.send(
+                "❌ **无法访问**：请检查链接是否正确，以及检查bot是否有权限查看该频道和消息。",
+                ephemeral=True,
+            )
+        except Exception:
+            log_context = {
+                "user_id": interaction.user.id,
+                "guild_id": guild_id,
+                "channel_id": channel_id,
+                "message_id": message_id,
+            }
             logger.error("/关注比赛 命令出错", extra=log_context, exc_info=True)
-            await interaction.followup.send("⚙️ **发生未知错误**，请稍后再试或联系管理员。", ephemeral=True)
+            await interaction.followup.send(
+                "⚙️ **发生未知错误**，请稍后再试或联系管理员。", ephemeral=True
+            )
 
     @app_commands.command(name="取关杯赛", description="通过消息链接取消关注一个杯赛")
-    @app_commands.rename(message_link='消息链接')
-    async def unfollow_competition_slash(self, interaction: discord.Interaction, message_link: str):
+    @app_commands.rename(message_link="消息链接")
+    async def unfollow_competition_slash(
+        self, interaction: discord.Interaction, message_link: str
+    ):
         await interaction.response.defer(ephemeral=True)
 
         _, _, message_id = await self._parse_message_link(message_link)
 
         if not message_id:
-            await interaction.followup.send("❌ **格式错误**：请输入一个有效的 Discord 消息链接。", ephemeral=True)
+            await interaction.followup.send(
+                "❌ **格式错误**：请输入一个有效的 Discord 消息链接。", ephemeral=True
+            )
             return
-        
+
         await self._internal_unfollow(interaction, message_id)
 
     # ----------------------------------------------------------------
     # Background Task
     # ----------------------------------------------------------------
 
-    @tasks.loop(minutes=float(os.getenv('COMPETITION_CHECK_INTERVAL_MINUTES', '1.0')))
+    @tasks.loop(minutes=float(os.getenv("COMPETITION_CHECK_INTERVAL_MINUTES", "1.0")))
     async def check_competitions(self):
         """定期轮询检查所有被关注的比赛是否有更新。"""
         logger.debug("开始执行比赛更新的计划任务...")
@@ -180,20 +252,30 @@ class CompetitionTracker(commands.Cog):
             return
 
         for competition in all_competitions:
-            log_context = {'competition_message_id': competition.message_id, 'channel_id': competition.channel_id}
+            log_context = {
+                "competition_message_id": competition.message_id,
+                "channel_id": competition.channel_id,
+            }
             try:
                 # 使用重试逻辑获取频道和消息
-                channel = self.bot.get_channel(competition.channel_id) or await retry_on_discord_error(
+                channel = self.bot.get_channel(
+                    competition.channel_id
+                ) or await retry_on_discord_error(
                     lambda: self.bot.fetch_channel(competition.channel_id),
-                    f"检查比赛 - 获取频道 {competition.channel_id}"
+                    f"检查比赛 - 获取频道 {competition.channel_id}",
                 )
                 if not channel:
-                    logger.warning(f"无法找到频道 {competition.channel_id}，跳过比赛检查。", extra=log_context)
+                    logger.warning(
+                        f"无法找到频道 {competition.channel_id}，跳过比赛检查。",
+                        extra=log_context,
+                    )
                     continue
-                
+
+                # 断言 channel 支持 fetch_message
+                assert hasattr(channel, "fetch_message"), "频道不支持获取消息"
                 message = await retry_on_discord_error(
-                    lambda: channel.fetch_message(competition.message_id),
-                    f"检查比赛 - 获取消息 {competition.message_id}"
+                    lambda: channel.fetch_message(competition.message_id),  # type: ignore
+                    f"检查比赛 - 获取消息 {competition.message_id}",
                 )
                 await self._process_competition_update(message, competition)
             except discord.NotFound:
@@ -201,52 +283,75 @@ class CompetitionTracker(commands.Cog):
             except discord.Forbidden:
                 logger.error("访问比赛消息时权限不足。", extra=log_context)
             except discord.errors.DiscordServerError:
-                logger.error("在所有重试后，获取比赛信息最终失败。", extra=log_context, exc_info=True)
-            except Exception as e:
-                logger.error("处理比赛时发生未知错误。", extra=log_context, exc_info=True)
+                logger.error(
+                    "在所有重试后，获取比赛信息最终失败。",
+                    extra=log_context,
+                    exc_info=True,
+                )
+            except Exception:
+                logger.error(
+                    "处理比赛时发生未知错误。", extra=log_context, exc_info=True
+                )
 
-    async def _process_competition_update(self, message: discord.Message, followed_competition: Competition):
+    async def _process_competition_update(
+        self, message: discord.Message, followed_competition: Competition
+    ):
         """处理单个比赛的更新检查和通知逻辑。"""
         if not message.embeds:
             return
 
         competition_embed = message.embeds[0]
-        competition_name = message.channel.name
+        # 获取频道名称，处理不同类型的 channel
+        channel = message.channel
+        competition_name: str = (
+            getattr(channel, "name", None) or f"未知频道-{channel.id}"
+        )
 
         new_submission_ids = parsing_service.extract_submission_ids(competition_embed)
         if not new_submission_ids:
             return
 
         old_submission_ids = followed_competition.last_submission_ids
-        newly_added_ids = parsing_service.find_new_submissions(old_submission_ids, new_submission_ids)
+        newly_added_ids = parsing_service.find_new_submissions(
+            old_submission_ids, new_submission_ids
+        )
 
         if not newly_added_ids:
             return
-        
+
         log_context = {
-            'competition_name': competition_name,
-            'message_id': message.id,
-            'new_submission_count': len(newly_added_ids),
-            'new_submission_ids': newly_added_ids
+            "competition_name": competition_name,
+            "message_id": message.id,
+            "new_submission_count": len(newly_added_ids),
+            "new_submission_ids": newly_added_ids,
         }
         logger.info("发现比赛有新作品提交", extra=log_context)
 
-        subscribers = await self.follow_service.get_subscribers_for_competition(message.id)
+        subscribers = await self.follow_service.get_subscribers_for_competition(
+            message.id
+        )
         if not subscribers:
-            logger.info("此比赛没有订阅者，跳过通知。", extra={'message_id': message.id})
+            logger.info(
+                "此比赛没有订阅者，跳过通知。", extra={"message_id": message.id}
+            )
         else:
-            logger.info(f"正在通知 {len(subscribers)} 位比赛订阅者。", extra={'message_id': message.id, 'subscriber_count': len(subscribers)})
+            logger.info(
+                f"正在通知 {len(subscribers)} 位比赛订阅者。",
+                extra={"message_id": message.id, "subscriber_count": len(subscribers)},
+            )
             for new_id in newly_added_ids:
                 for user_id in subscribers:
                     await self.notification_service.send_new_submission_notification(
                         user_id=user_id,
                         new_submission_id=new_id,
                         competition_message=message,
-                        competition_name=competition_name
+                        competition_name=competition_name,
                     )
-        
-        await self.follow_service.update_submission_state(message.id, new_submission_ids)
-        logger.info("成功更新比赛的提交状态。", extra={'message_id': message.id})
+
+        await self.follow_service.update_submission_state(
+            message.id, new_submission_ids
+        )
+        logger.info("成功更新比赛的提交状态。", extra={"message_id": message.id})
 
     @check_competitions.before_loop
     async def before_check_competitions(self):
@@ -255,5 +360,5 @@ class CompetitionTracker(commands.Cog):
         logger.info("比赛更新检查循环已准备就绪。")
 
 
-async def setup(bot: commands.Bot):
+async def setup(bot: "MyBot"):
     await bot.add_cog(CompetitionTracker(bot))
