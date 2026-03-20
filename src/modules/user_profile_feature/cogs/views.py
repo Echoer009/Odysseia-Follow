@@ -50,6 +50,8 @@ class MainMenuView(ui.View):
     async def manage_authors(self, interaction: discord.Interaction, button: ui.Button):
         await interaction.response.defer()
         try:
+            if not self.profile_cog.profile_service:
+                raise AttributeError("Profile service not found on profile_cog.")
             followed_authors = (
                 await self.profile_cog.profile_service.get_user_profile_data(
                     interaction.user.id
@@ -75,8 +77,9 @@ class MainMenuView(ui.View):
         self, interaction: discord.Interaction, button: ui.Button
     ):
         try:
-            subscription_cog: "SubscriptionTracker" = self.profile_cog.bot.get_cog(
-                "SubscriptionTracker"
+            subscription_cog = cast(
+                "SubscriptionTracker",
+                self.profile_cog.bot.get_cog("SubscriptionTracker"),
             )
             if subscription_cog:
                 await subscription_cog.send_main_subscription_view(
@@ -110,6 +113,8 @@ class MainMenuView(ui.View):
         await interaction.response.defer()
         try:
             favorites_service = self.profile_cog.bot.favorites_service
+            if not favorites_service:
+                raise AttributeError("Favorites service not found on bot object.")
             user = cast(discord.User, interaction.user)
             view = FavoritesManageView(self.profile_cog, favorites_service, user)
             await view.send_initial_message(interaction)
@@ -224,6 +229,8 @@ class FollowsManageView(ui.View):
         await interaction.response.defer()
         data = cast(dict[str, Any], interaction.data)
         author_id = int(data["values"][0])
+        if not self.author_follow_service:
+            raise AttributeError("Author follow service not found on profile_cog.")
         result = await self.author_follow_service.unfollow_author(
             self.user_id, author_id
         )
@@ -422,10 +429,16 @@ class SubscriptionMenuView(ui.View):
 
         # Dropdown for managing existing subscriptions
         if self.subscribed_channels:
-            options = [
-                discord.SelectOption(label=ch.name, value=str(ch.id))
-                for ch in self.subscribed_channels
-            ]
+            options = []
+            for ch in self.subscribed_channels:
+                # 获取频道所属的类别名称
+                category_name = ch.category.name if ch.category else "无类别"
+                # 格式: "类别名 - 频道名"
+                label = f"{category_name} - {ch.name}"
+                # Discord SelectOption label 最大长度为 100 字符
+                if len(label) > 100:
+                    label = label[:97] + "..."
+                options.append(discord.SelectOption(label=label, value=str(ch.id)))
             select = ui.Select(
                 placeholder="选择一个已关注的频道进行管理...", options=options
             )
@@ -504,9 +517,16 @@ class ChannelMultiSelect(ui.Select):
         self.all_channels = channels
         self.selected_values = selected_values or []
 
-        options = [
-            discord.SelectOption(label=ch.name, value=str(ch.id)) for ch in channels
-        ]
+        options = []
+        for ch in channels:
+            # 获取频道所属的类别名称
+            category_name = ch.category.name if ch.category else "无类别"
+            # 格式: "类别名 - 频道名"
+            label = f"{category_name} - {ch.name}"
+            # Discord SelectOption label 最大长度为 100 字符
+            if len(label) > 100:
+                label = label[:97] + "..."
+            options.append(discord.SelectOption(label=label, value=str(ch.id)))
         if not options:
             options.append(
                 discord.SelectOption(
@@ -834,6 +854,9 @@ class FavoritesManageView(ui.View):
             scanner_service = self.profile_cog.bot.scanner_service
             if not scanner_service:
                 raise AttributeError("Scanner service not found on bot object.")
+
+            if not interaction.guild:
+                raise AttributeError("Guild not found in interaction.")
 
             await scanner_service.scan_guild(interaction.guild)
 
