@@ -22,6 +22,37 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+class JumpToPageModal(ui.Modal, title="跳转到指定页"):
+    def __init__(self, total_pages: int, jump_callback):
+        super().__init__()
+        self.total_pages = total_pages
+        self.jump_callback = jump_callback
+        self.page_input = ui.TextInput(
+            label="页码",
+            placeholder=f"请输入页码 (1 ~ {total_pages})",
+            required=True,
+            max_length=4,
+        )
+        self.add_item(self.page_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            page = int(self.page_input.value.strip())
+        except ValueError:
+            await interaction.response.send_message(
+                "⚠️ 请输入有效的数字。", ephemeral=True, delete_after=5
+            )
+            return
+        if page < 1 or page > self.total_pages:
+            await interaction.response.send_message(
+                f"⚠️ 页码超出范围，请输入 1 ~ {self.total_pages}。",
+                ephemeral=True,
+                delete_after=5,
+            )
+            return
+        await self.jump_callback(interaction, page)
+
+
 # --- Main Menu UI ---
 class MainMenuView(ui.View):
     """主菜单视图，作为统一管理入口"""
@@ -210,6 +241,14 @@ class FollowsManageView(ui.View):
         next_button.callback = self.next_page
         self.add_item(next_button)
 
+        jump_button = ui.Button(
+            label="🔢 跳转",
+            style=discord.ButtonStyle.secondary,
+            disabled=(self.total_pages <= 1),
+        )
+        jump_button.callback = self.jump_button_callback
+        self.add_item(jump_button)
+
         back_button = ui.Button(
             label="返回主菜单", style=discord.ButtonStyle.grey, row=2
         )
@@ -271,6 +310,15 @@ class FollowsManageView(ui.View):
 
     async def next_page(self, interaction: discord.Interaction):
         self.current_page += 1
+        self.update_components()
+        await interaction.response.edit_message(embed=self.create_embed(), view=self)
+
+    async def jump_button_callback(self, interaction: discord.Interaction):
+        modal = JumpToPageModal(self.total_pages, self._jump_to_page)
+        await interaction.response.send_modal(modal)
+
+    async def _jump_to_page(self, interaction: discord.Interaction, page: int):
+        self.current_page = page - 1
         self.update_components()
         await interaction.response.edit_message(embed=self.create_embed(), view=self)
 
@@ -599,6 +647,7 @@ class ChannelSelectView(ui.View):
         """更新翻页按钮的禁用状态"""
         self.prev_page.disabled = self.current_page <= 1
         self.next_page.disabled = self.current_page >= self.total_pages
+        self.jump_button.disabled = self.total_pages <= 1
 
     def create_embed(self) -> discord.Embed:
         page_info = (
@@ -638,6 +687,30 @@ class ChannelSelectView(ui.View):
         # 切换到下一页
         self.current_page = min(self.total_pages, self.current_page + 1)
         await self._refresh_view(interaction)
+
+    @ui.button(label="🔢 跳转", style=discord.ButtonStyle.secondary, row=1)
+    async def jump_button(self, interaction: discord.Interaction, button: ui.Button):
+        modal = JumpToPageModal(self.total_pages, self._jump_to_page)
+        await interaction.response.send_modal(modal)
+
+    async def _jump_to_page(self, interaction: discord.Interaction, page: int):
+        if self.select_menu.values and self.select_menu.values[0] != "disabled":
+            for val in self.select_menu.values:
+                if val not in self.selected_channel_ids:
+                    self.selected_channel_ids.append(val)
+
+        self.current_page = page
+        self.remove_item(self.select_menu)
+        start_idx = (self.current_page - 1) * CHANNEL_PAGE_SIZE
+        end_idx = start_idx + CHANNEL_PAGE_SIZE
+        current_page_channels = self.all_channels[start_idx:end_idx]
+        self.select_menu = ChannelMultiSelect(
+            current_page_channels, self.selected_channel_ids
+        )
+        self.add_item(self.select_menu)
+        self._update_pagination_buttons()
+        embed = self.create_embed()
+        await interaction.response.edit_message(embed=embed, view=self)
 
     async def _refresh_view(self, interaction: discord.Interaction):
         """刷新视图，更新当前页的频道列表"""
@@ -750,6 +823,14 @@ class FavoritesManageView(ui.View):
         next_button.callback = self.next_page_button
         self.add_item(next_button)
 
+        jump_button = ui.Button(
+            label="🔢 跳转",
+            style=discord.ButtonStyle.grey,
+            disabled=(self.total_pages <= 1),
+        )
+        jump_button.callback = self.jump_button_callback
+        self.add_item(jump_button)
+
         # The refresh button is now the primary action on this view.
         # It will be moved here from the BatchLeaveView.
         refresh_button = ui.Button(
@@ -826,6 +907,16 @@ class FavoritesManageView(ui.View):
             await self.update_view_internals()
             embed = await self.create_favorites_embed()
             await interaction.response.edit_message(embed=embed, view=self)
+
+    async def jump_button_callback(self, interaction: discord.Interaction):
+        modal = JumpToPageModal(self.total_pages, self._jump_to_page)
+        await interaction.response.send_modal(modal)
+
+    async def _jump_to_page(self, interaction: discord.Interaction, page: int):
+        self.current_page = page
+        await self.update_view_internals()
+        embed = await self.create_favorites_embed()
+        await interaction.response.edit_message(embed=embed, view=self)
 
     async def refresh_active_threads_button(self, interaction: discord.Interaction):
         """
@@ -1202,6 +1293,15 @@ class BatchUnfavoriteView(ui.View):
         next_button.callback = self.next_page
         self.add_item(next_button)
 
+        jump_button = ui.Button(
+            label="🔢 跳转",
+            style=discord.ButtonStyle.secondary,
+            disabled=(self.total_pages <= 1),
+            row=1,
+        )
+        jump_button.callback = self.jump_button_callback
+        self.add_item(jump_button)
+
         confirm_button = ui.Button(
             label="✅ 确认取消收藏", style=discord.ButtonStyle.danger, row=2
         )
@@ -1243,6 +1343,16 @@ class BatchUnfavoriteView(ui.View):
         if self.current_page < self.total_pages - 1:
             self.current_page += 1
             await self.update_message(interaction)
+
+    async def jump_button_callback(self, interaction: discord.Interaction):
+        modal = JumpToPageModal(self.total_pages, self._jump_to_page)
+        await interaction.response.send_modal(modal)
+
+    async def _jump_to_page(self, interaction: discord.Interaction, page: int):
+        self.current_page = page - 1
+        self.update_components()
+        embed = self.create_embed()
+        await interaction.response.edit_message(embed=embed, view=self)
 
     def disable_all_components(self):
         for item in self.children:
@@ -1403,6 +1513,15 @@ class BatchLeaveView(ui.View):
             next_button.callback = self.next_page
             self.add_item(next_button)
 
+            jump_button = ui.Button(
+                label="🔢 跳转",
+                style=discord.ButtonStyle.secondary,
+                disabled=(self.total_pages <= 1),
+                row=1,
+            )
+            jump_button.callback = self.jump_button_callback
+            self.add_item(jump_button)
+
             confirm_button = ui.Button(
                 label="✅ 确认退出", style=discord.ButtonStyle.danger, row=2
             )
@@ -1447,6 +1566,16 @@ class BatchLeaveView(ui.View):
         if self.current_page < self.total_pages - 1:
             self.current_page += 1
             await self.update_message(interaction)
+
+    async def jump_button_callback(self, interaction: discord.Interaction):
+        modal = JumpToPageModal(self.total_pages, self._jump_to_page)
+        await interaction.response.send_modal(modal)
+
+    async def _jump_to_page(self, interaction: discord.Interaction, page: int):
+        self.current_page = page - 1
+        self.update_components()
+        embed = self.create_embed()
+        await interaction.response.edit_message(embed=embed, view=self)
 
     # This button is now removed from this view.
 
